@@ -241,6 +241,68 @@ class LLMGateway:
             pass
         return self._fallback_plan_tasks(user_input, max_tasks=max_tasks), "rule"
 
+    def supervisor_review_decision(
+        self,
+        *,
+        user_input: str,
+        reports: list[str],
+        cycle: int,
+        max_cycles: int,
+    ) -> tuple[bool, str, str]:
+        if cycle >= max_cycles:
+            return False, "", "Reached max cycle limit."
+
+        if not self.api_configured or self.client is None:
+            return self._fallback_supervisor_review_decision(
+                user_input=user_input,
+                reports=reports,
+                cycle=cycle,
+                max_cycles=max_cycles,
+            )
+
+        recent_reports = reports[-3:] if reports else []
+        report_block = "\n\n".join(recent_reports) if recent_reports else "(no reports yet)"
+        prompt = (
+            "You are a supervisor loop controller.\n"
+            "Given the original user request and worker reports, decide whether to continue delegation.\n"
+            "Respond with JSON only in this shape:\n"
+            '{"continue": true/false, "next_focus_task": "<string>", "reason": "<string>"}\n'
+            "Rules:\n"
+            "- If current output is sufficient and coherent, set continue=false.\n"
+            "- If key requirements are missing, set continue=true and provide the next focus task.\n"
+            f"- Current cycle: {cycle}, max cycles: {max_cycles}.\n\n"
+            f"User request:\n{user_input}\n\n"
+            f"Recent reports:\n{report_block}\n"
+        )
+        try:
+            response = self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            content = (response.choices[0].message.content or "").strip()
+            parsed = self._parse_supervisor_decision(content)
+            if parsed is not None:
+                should_continue, next_focus_task, reason = parsed
+                if should_continue and not next_focus_task.strip():
+                    next_focus_task = "Refine missing constraints, risks, and acceptance criteria."
+                return should_continue, next_focus_task, reason or "Supervisor decision from model."
+        except Exception as error:  # noqa: BLE001
+            fallback_continue, fallback_focus, fallback_reason = self._fallback_supervisor_review_decision(
+                user_input=user_input,
+                reports=reports,
+                cycle=cycle,
+                max_cycles=max_cycles,
+            )
+            return fallback_continue, fallback_focus, f"{fallback_reason} (fallback due to: {error})"
+
+        return self._fallback_supervisor_review_decision(
+            user_input=user_input,
+            reports=reports,
+            cycle=cycle,
+            max_cycles=max_cycles,
+        )
+
     def run_agent(
         self,
         agent: AgentDefinition,
@@ -2093,6 +2155,67 @@ class LLMGateway:
         if not tasks:
             return [user_input.strip()]
         return tasks[:max_tasks]
+
+    def _parse_supervisor_decision(self, content: str) -> tuple[bool, str, str] | None:
+        text = str(content or "").strip()
+        if not text:
+            return None
+
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+
+        parsed: object
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            brace = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if not brace:
+                return None
+            try:
+                parsed = json.loads(brace.group(0))
+            except json.JSONDecodeError:
+                return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        raw_continue = parsed.get("continue")
+        if isinstance(raw_continue, bool):
+            should_continue = raw_continue
+        elif isinstance(raw_continue, str):
+            normalized = raw_continue.strip().lower()
+            should_continue = normalized in {"true", "yes", "y", "1", "continue"}
+        else:
+            should_continue = bool(raw_continue)
+
+        next_focus_task = str(parsed.get("next_focus_task") or parsed.get("next_focus") or "").strip()
+        reason = str(parsed.get("reason") or parsed.get("decision_reason") or "").strip()
+        return should_continue, next_focus_task, reason
+
+    def _fallback_supervisor_review_decision(
+        self,
+        *,
+        user_input: str,
+        reports: list[str],
+        cycle: int,
+        max_cycles: int,
+    ) -> tuple[bool, str, str]:
+        if cycle >= max_cycles:
+            return False, "", "Reached max cycle limit."
+
+        request = str(user_input or "").strip()
+        latest = str(reports[-1] if reports else "").lower()
+        complete_markers = ("final", "complete", "done", "conclusion", "最终", "结论", "已完成")
+        unresolved_markers = ("todo", "unknown", "risk", "assumption", "待补充", "未知", "风险", "假设")
+
+        if cycle < 2 and len(request) >= 24:
+            return True, "补充约束条件、边界场景与验收标准。", "Fallback: run at least two cycles for non-trivial requests."
+        if any(token in latest for token in unresolved_markers):
+            return True, "针对未解决项继续补充可执行细节。", "Fallback: latest report indicates unresolved items."
+        if any(token in latest for token in complete_markers):
+            return False, "", "Fallback: latest report appears complete."
+        return False, "", "Fallback: no strong signal to continue."
 
 
 llm_gateway = LLMGateway()

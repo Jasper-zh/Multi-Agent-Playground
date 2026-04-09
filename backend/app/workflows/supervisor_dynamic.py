@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from typing import Any, TypedDict
 
@@ -28,9 +27,6 @@ FINALIZE_NODE = "finalize"
 
 class SupervisorState(TypedDict, total=False):
     user_input: str
-    work_items: list[str]
-    pending_items: list[str]
-    min_cycles: int
     max_cycles: int
     cycle: int
     current_focus_task: str
@@ -52,30 +48,19 @@ def event(
     return TraceEvent(type=event_type, title=title, detail=detail, payload=payload)
 
 
-def _extract_work_items(user_input: str, max_items: int = 5) -> list[str]:
-    parts = re.split(r"[\n;,\u3002\uff1b]+", user_input)
-    items: list[str] = []
-    for chunk in parts:
-        normalized = chunk.strip()
-        if not normalized:
-            continue
-        numbered = re.split(r"(?:^|\s)(?:\d+[.)]\s+|[-*]\s+)", normalized)
-        extracted = [item.strip() for item in numbered if item.strip()]
-        if extracted:
-            items.extend(extracted)
-        else:
-            items.append(normalized)
-    if not items:
-        return [user_input.strip()]
-    return items[:max_items]
+def _estimate_max_cycles(user_input: str) -> int:
+    text = str(user_input or "").strip()
+    if not text:
+        return 2
 
-
-def _needs_min_two_cycles(user_input: str, work_items: list[str]) -> bool:
-    if len(work_items) >= 2:
-        return True
-    lowered = user_input.lower()
-    hints = (" and ", " also ", " then ", "compare", "tradeoff", "vs ", "step by step")
-    return any(token in lowered for token in hints) or len(user_input.strip()) > 120
+    lowered = text.lower()
+    if len(text) >= 180:
+        return 5
+    if any(token in lowered for token in ("compare", "tradeoff", "vs ", "step by step")):
+        return 4
+    if any(token in text for token in ("以及", "并且", "同时", "另外", "对比", "区别", "优缺点", "先", "再")):
+        return 4
+    return 3
 
 
 def _compile_supervisor_app(
@@ -353,18 +338,14 @@ def run_supervisor_dynamic(
                 node_id=INTAKE_NODE,
             ),
         )
-        work_items = _extract_work_items(state["user_input"])
-        min_cycles = 2 if _needs_min_two_cycles(state["user_input"], work_items) else 1
-        max_cycles = min(6, max(2, len(work_items) + 1))
+        max_cycles = _estimate_max_cycles(state["user_input"])
         push(
             trace,
             event(
                 "state_updated",
                 "Intake Completed",
-                f"Supervisor extracted {len(work_items)} work item(s).",
+                f"Supervisor initialized dynamic loop (max {max_cycles} cycle(s)).",
                 node_id=INTAKE_NODE,
-                work_items=work_items,
-                min_cycles=min_cycles,
                 max_cycles=max_cycles,
             ),
         )
@@ -378,18 +359,15 @@ def run_supervisor_dynamic(
             ),
         )
         return {
-            "work_items": work_items,
-            "pending_items": list(work_items),
-            "min_cycles": min_cycles,
             "max_cycles": max_cycles,
             "cycle": 0,
+            "current_focus_task": state["user_input"],
             "reports": [],
         }
 
     def delegation_node(state: SupervisorState) -> SupervisorState:
         cycle = int(state.get("cycle", 0)) + 1
-        pending_items = list(state.get("pending_items", []))
-        focus_task = pending_items[0] if pending_items else state["user_input"]
+        focus_task = str(state.get("current_focus_task") or state["user_input"]).strip() or state["user_input"]
         push(
             trace,
             event(
@@ -481,12 +459,8 @@ def run_supervisor_dynamic(
                 ),
             )
 
-            pending_items = list(state.get("pending_items", []))
-            if pending_items:
-                pending_items.pop(0)
             return {
                 "reports": reports,
-                "pending_items": pending_items,
                 "combined_report": "\n\n".join(reports),
             }
 
@@ -494,9 +468,8 @@ def run_supervisor_dynamic(
 
     def review_node(state: SupervisorState) -> SupervisorState:
         cycle = int(state.get("cycle", 0))
-        pending_items = list(state.get("pending_items", []))
-        min_cycles = int(state.get("min_cycles", 1))
         max_cycles = int(state.get("max_cycles", 2))
+        reports = list(state.get("reports", []))
         push(
             trace,
             event(
@@ -508,9 +481,12 @@ def run_supervisor_dynamic(
             ),
         )
 
-        should_continue = (cycle < min_cycles) or bool(pending_items)
-        if cycle >= max_cycles:
-            should_continue = False
+        should_continue, next_focus_task, review_reason = llm_gateway.supervisor_review_decision(
+            user_input=state["user_input"],
+            reports=reports,
+            cycle=cycle,
+            max_cycles=max_cycles,
+        )
 
         if should_continue:
             push(
@@ -518,10 +494,11 @@ def run_supervisor_dynamic(
                 event(
                     "state_updated",
                     "Review Decision",
-                    "Coverage is incomplete, continue delegation loop.",
+                    "Supervisor decided to continue delegation.",
                     node_id=REVIEW_NODE,
                     cycle=cycle,
-                    remaining_items=pending_items,
+                    reason=review_reason,
+                    next_focus_task=next_focus_task,
                 ),
             )
             push(
@@ -545,7 +522,10 @@ def run_supervisor_dynamic(
                     cycle=cycle,
                 ),
             )
-            return {"continue_loop": True}
+            return {
+                "continue_loop": True,
+                "current_focus_task": next_focus_task or state["user_input"],
+            }
 
         terminal_node = FINALIZE_NODE if workflow.finalizer_enabled else "end"
         push(
@@ -553,10 +533,10 @@ def run_supervisor_dynamic(
             event(
                 "state_updated",
                 "Review Decision",
-                "Coverage is sufficient, workflow can finish.",
+                "Supervisor decided current result is sufficient to finish.",
                 node_id=REVIEW_NODE,
                 cycle=cycle,
-                remaining_items=pending_items,
+                reason=review_reason,
             ),
         )
         push(
@@ -580,7 +560,7 @@ def run_supervisor_dynamic(
                 cycle=cycle,
             ),
         )
-        return {"continue_loop": False}
+        return {"continue_loop": False, "current_focus_task": next_focus_task or state["user_input"]}
 
     def finalize_node(state: SupervisorState) -> SupervisorState:
         push(

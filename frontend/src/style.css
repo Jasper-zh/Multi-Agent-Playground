@@ -826,10 +826,14 @@ pre,
   line-height: 1.48;
   letter-spacing: 0;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  flex: 1 1 auto;
+}
+
+.agent-prompt-preview {
+  min-height: 82px;
+  max-height: 82px;
 }
 
 .agent-action-row {

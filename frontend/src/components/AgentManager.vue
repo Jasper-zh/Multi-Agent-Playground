@@ -119,6 +119,12 @@ function resolveRoleLabel(name, description) {
   return `${raw.slice(0, 27).trim()}...`;
 }
 
+function previewPrompt(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  return raw.replace(/\s+/g, " ");
+}
+
 function resolveSkillIcon(skill) {
   const text = `${skill.name || ""} ${skill.description || ""} ${skill.instruction || ""}`.toLowerCase();
   if (text.includes("search") || text.includes("web") || text.includes("internet")) return Globe;
@@ -394,7 +400,9 @@ function getSkillDisplay(skillId) {
         <p class="workflow-id">agent_{{ agent.id }}</p>
         <div class="agent-role-prompt-block">
           <span class="chip role-chip agent-role-pill" :title="agent.description">{{ agent.roleLabel }}</span>
-          <p class="agent-summary">{{ agent.description }}</p>
+          <p class="agent-summary agent-prompt-preview" :title="agent.system_prompt || ''">
+            {{ previewPrompt(agent.system_prompt) || "-" }}
+          </p>
         </div>
 
         <div v-if="agent.boundSkills.length" class="agent-installed-skills">

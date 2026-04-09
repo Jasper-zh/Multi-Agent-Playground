@@ -1169,64 +1169,136 @@ class SQLitePlaygroundStore:
         self._rename_default_workflow_names()
 
         skills = self.list_skills()
+        skill_id_by_name = {skill.name: skill.id for skill in skills}
+
+        default_agent_specs = [
+            {
+                "name": "解决方案架构师",
+                "description": "负责需求澄清、架构方案设计与落地计划制定。",
+                "system_prompt": (
+                    "你是软件交付团队中的“解决方案架构师”。\n"
+                    "职责：\n"
+                    "1) 澄清目标、约束与验收标准；\n"
+                    "2) 提供可选架构方案并说明复杂度、成本与风险权衡；\n"
+                    "3) 输出可执行的实施里程碑与依赖关系。\n"
+                    "输出规则：\n"
+                    "- 结构化表达，明确假设；\n"
+                    "- 标注未知项与下一步决策点；\n"
+                    "- 非必要不下沉到实现细节代码。"
+                ),
+                "skill_names": ["Structured Reasoning"],
+            },
+            {
+                "name": "实施工程师",
+                "description": "将方案转化为可执行实现，给出具体代码与落地步骤。",
+                "system_prompt": (
+                    "你是“实施工程师”。\n"
+                    "职责：\n"
+                    "1) 将已确认方案转化为可执行的实现任务；\n"
+                    "2) 提供代码级建议、命令与文件级改动说明；\n"
+                    "3) 保持方案务实、最小改动且可上线。\n"
+                    "输出规则：\n"
+                    "- 优先给可运行片段与明确路径；\n"
+                    "- 说明前置条件与回滚策略；\n"
+                    "- 覆盖边界场景与失败处理。"
+                ),
+                "skill_names": ["Structured Reasoning", "Teaching Mode"],
+            },
+            {
+                "name": "质量与风险审查员",
+                "description": "负责发现质量风险、回归问题与验证缺口。",
+                "system_prompt": (
+                    "你是“质量与风险审查员”。\n"
+                    "职责：\n"
+                    "1) 从正确性、安全性、稳定性角度审查方案与输出；\n"
+                    "2) 识别回归风险、测试缺失与运维风险；\n"
+                    "3) 给出按优先级排序的修复建议与验收清单。\n"
+                    "输出规则：\n"
+                    "- 问题按严重度排序；\n"
+                    "- 区分已确认问题与假设；\n"
+                    "- 最后给出明确的 Go/No-Go 建议。"
+                ),
+                "skill_names": ["Risk Review"],
+            },
+        ]
+
+        def resolve_skill_ids(skill_names: list[str]) -> list[str]:
+            return [skill_id_by_name[name] for name in skill_names if skill_id_by_name.get(name)]
 
         agents = self.list_agents()
-        if not agents:
-            self.create_agent(
-                AgentDefinitionCreate(
-                    name="Architecture Coach",
-                    description="Explains architecture choices, boundaries, and tradeoffs.",
-                    system_prompt=(
-                        "You are an architecture specialist agent. Explain structure, boundaries, "
-                        "and design tradeoffs with clear teaching style."
-                    ),
-                    skill_ids=[skills[0].id, skills[1].id] if len(skills) >= 2 else [],
-                )
-            )
-            self.create_agent(
-                AgentDefinitionCreate(
-                    name="Documentation Writer",
-                    description="Turns technical thoughts into concise and readable docs.",
-                    system_prompt=(
-                        "You are a documentation specialist agent. Convert technical ideas into "
-                        "clear and concise explanations."
-                    ),
-                    skill_ids=[skills[0].id] if skills else [],
-                )
-            )
-            self.create_agent(
-                AgentDefinitionCreate(
-                    name="Learning Coach",
-                    description="Provides learning paths, drills, and practical next steps.",
-                    system_prompt=(
-                        "You are a learning coach specialist agent. Provide practical learning "
-                        "sequence, exercises, and concrete next actions."
-                    ),
-                    skill_ids=[skills[2].id] if len(skills) >= 3 else [],
-                )
-            )
-            agents = self.list_agents()
-
-        skill_id_by_name = {skill.name: skill.id for skill in skills}
-        default_skill_bindings = {
-            "Architecture Coach": [
-                skill_id_by_name.get("Structured Reasoning"),
-                skill_id_by_name.get("Risk Review"),
-            ],
-            "Documentation Writer": [
-                skill_id_by_name.get("Structured Reasoning"),
-            ],
-            "Learning Coach": [
-                skill_id_by_name.get("Teaching Mode"),
-            ],
+        legacy_to_new = {
+            "Architecture Coach": 0,
+            "Documentation Writer": 1,
+            "Learning Coach": 2,
+            "Solution Architect": 0,
+            "Implementation Engineer": 1,
+            "QA & Risk Reviewer": 2,
+        }
+        legacy_prompt_markers = {
+            "Architecture Coach": "You are an architecture specialist agent.",
+            "Documentation Writer": "You are a documentation specialist agent.",
+            "Learning Coach": "You are a learning coach specialist agent.",
+            "Solution Architect": "You are the Solution Architect in a software delivery team.",
+            "Implementation Engineer": "You are the Implementation Engineer.",
+            "QA & Risk Reviewer": "You are the QA and Risk Reviewer.",
         }
         for agent in agents:
-            desired = [skill_id for skill_id in default_skill_bindings.get(agent.name, []) if skill_id]
+            spec_index = legacy_to_new.get(agent.name)
+            if spec_index is None:
+                continue
+            marker = legacy_prompt_markers.get(agent.name, "")
+            if marker and marker not in (agent.system_prompt or ""):
+                continue
+            spec = default_agent_specs[spec_index]
+            desired_skill_ids = agent.skill_ids or resolve_skill_ids(spec["skill_names"])
+            self.update_agent(
+                agent.id,
+                AgentDefinitionUpdate(
+                    name=spec["name"],
+                    description=spec["description"],
+                    system_prompt=spec["system_prompt"],
+                    model=agent.model,
+                    skill_ids=desired_skill_ids,
+                ),
+            )
+        agents = self.list_agents()
+
+        if not agents:
+            for spec in default_agent_specs:
+                self.create_agent(
+                    AgentDefinitionCreate(
+                        name=spec["name"],
+                        description=spec["description"],
+                        system_prompt=spec["system_prompt"],
+                        skill_ids=resolve_skill_ids(spec["skill_names"]),
+                    )
+                )
+            agents = self.list_agents()
+
+        spec_by_name = {spec["name"]: spec for spec in default_agent_specs}
+        for agent in agents:
+            spec = spec_by_name.get(agent.name)
+            if not spec:
+                continue
+            desired = resolve_skill_ids(spec["skill_names"])
             if desired and not agent.skill_ids:
                 self.set_agent_skill_ids(agent.id, desired)
         agents = self.list_agents()
 
-        default_agent_ids = [agent.id for agent in agents[:3]]
+        default_agent_ids: list[str] = []
+        by_name = {agent.name: agent for agent in agents}
+        for spec in default_agent_specs:
+            matched = by_name.get(spec["name"])
+            if matched and matched.id not in default_agent_ids:
+                default_agent_ids.append(matched.id)
+        if len(default_agent_ids) < 3:
+            for agent in agents:
+                if agent.id in default_agent_ids:
+                    continue
+                default_agent_ids.append(agent.id)
+                if len(default_agent_ids) >= 3:
+                    break
+
         if len(default_agent_ids) < 2:
             return
 
