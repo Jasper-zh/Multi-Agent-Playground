@@ -314,25 +314,13 @@ class LLMGateway:
         executable_skills = self._get_executable_skills(enabled_skills)
         if not self.api_configured or self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
-
-        if executable_skills:
-            return self._run_agent_with_tools(
-                agent=agent,
-                user_input=user_input,
-                system_prompt=system_prompt,
-                executable_skills=executable_skills,
-                trace_hook=trace_hook,
-            )
-
-        response = self.client.chat.completions.create(
-            model=agent.model or settings.OPENAI_MODEL,
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input},
-            ],
+        return self._run_agent_with_tools(
+            agent=agent,
+            user_input=user_input,
+            system_prompt=system_prompt,
+            executable_skills=executable_skills,
+            trace_hook=trace_hook,
         )
-        return (response.choices[0].message.content or "").strip()
 
     def finalize(self, user_input: str, agent: AgentDefinition, specialist_answer: str) -> str:
         if self._is_tool_blocked_response(specialist_answer):
@@ -454,6 +442,783 @@ class LLMGateway:
                 }
             )
         return executable
+
+    def _workspace_root(self) -> Path:
+        return Path(settings.PROJECT_ROOT).resolve()
+
+    def _desktop_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        home = Path.home()
+        candidates.append(home / "Desktop")
+        candidates.append(home / "OneDrive" / "Desktop")
+
+        userprofile = str(os.getenv("USERPROFILE") or "").strip()
+        if userprofile:
+            candidates.append(Path(userprofile) / "Desktop")
+
+        one_drive = (
+            str(os.getenv("OneDrive") or "").strip()
+            or str(os.getenv("OneDriveConsumer") or "").strip()
+            or str(os.getenv("OneDriveCommercial") or "").strip()
+        )
+        if one_drive:
+            candidates.append(Path(one_drive) / "Desktop")
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for item in candidates:
+            try:
+                key = str(item.resolve())
+            except OSError:
+                key = str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _known_folder_candidates(self, canonical: str) -> list[Path]:
+        home = Path.home()
+        userprofile = Path(str(os.getenv("USERPROFILE") or "").strip()) if str(os.getenv("USERPROFILE") or "").strip() else None
+        one_drive = (
+            str(os.getenv("OneDrive") or "").strip()
+            or str(os.getenv("OneDriveConsumer") or "").strip()
+            or str(os.getenv("OneDriveCommercial") or "").strip()
+        )
+        one_drive_path = Path(one_drive) if one_drive else None
+
+        if canonical == "desktop":
+            return self._desktop_candidates()
+
+        folder_name_map = {
+            "downloads": "Downloads",
+            "documents": "Documents",
+            "pictures": "Pictures",
+            "videos": "Videos",
+            "music": "Music",
+        }
+        folder_name = folder_name_map.get(canonical)
+        if not folder_name:
+            return []
+
+        candidates: list[Path] = [home / folder_name]
+        if userprofile is not None:
+            candidates.append(userprofile / folder_name)
+        if one_drive_path is not None:
+            candidates.append(one_drive_path / folder_name)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for item in candidates:
+            try:
+                key = str(item.resolve())
+            except OSError:
+                key = str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _allowed_filesystem_roots(self) -> list[Path]:
+        roots: list[Path] = [self._workspace_root()]
+
+        allow_desktop = self._coerce_bool(
+            os.getenv("AGENT_FS_ALLOW_DESKTOP", "1"),
+            default=True,
+        )
+        allow_user_folders = self._coerce_bool(
+            os.getenv("AGENT_FS_ALLOW_USER_FOLDERS", "1"),
+            default=True,
+        )
+        if allow_desktop:
+            for desktop in self._desktop_candidates():
+                if desktop.exists() and desktop.is_dir():
+                    roots.append(desktop.resolve())
+        if allow_user_folders:
+            for canonical in ("downloads", "documents", "pictures", "videos", "music"):
+                for candidate in self._known_folder_candidates(canonical):
+                    if candidate.exists() and candidate.is_dir():
+                        roots.append(candidate.resolve())
+
+        extra = str(os.getenv("AGENT_FS_ALLOWED_ROOTS", "") or "").strip()
+        if extra:
+            for token in re.split(r"[;\r\n]+", extra):
+                part = token.strip()
+                if not part:
+                    continue
+                candidate = Path(part).expanduser()
+                if not candidate.is_absolute():
+                    candidate = self._workspace_root() / candidate
+                if candidate.exists() and candidate.is_dir():
+                    roots.append(candidate.resolve())
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(root)
+        return deduped
+
+    def _is_in_allowed_roots(self, target: Path) -> bool:
+        resolved = target.resolve()
+        for root in self._allowed_filesystem_roots():
+            try:
+                resolved.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _resolve_special_path_alias(self, raw_path: str) -> Path | None:
+        normalized = str(raw_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return None
+
+        desktop_aliases = {"desktop", "桌面", "我的桌面", "~/desktop", "~\\desktop"}
+        lowered = normalized.lower()
+        if lowered in desktop_aliases:
+            candidates = self._desktop_candidates()
+            for candidate in candidates:
+                if candidate.exists():
+                    return candidate
+            return candidates[0] if candidates else None
+
+        desktop_prefixes = ("desktop/", "桌面/", "我的桌面/")
+        for prefix in desktop_prefixes:
+            if lowered.startswith(prefix):
+                tail = normalized[len(prefix) :]
+                candidates = self._desktop_candidates()
+                if not candidates:
+                    return None
+                base = next((item for item in candidates if item.exists()), candidates[0])
+                return base / Path(tail)
+        return None
+
+    def _workspace_relative(self, target: Path) -> str:
+        resolved = target.resolve()
+        workspace_root = self._workspace_root()
+        for root in self._allowed_filesystem_roots():
+            try:
+                relative = resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if root == workspace_root:
+                return relative or "."
+            root_label = root.name or str(root)
+            return f"{root_label}/{relative}" if relative else root_label
+        return str(resolved)
+
+    def _resolve_workspace_target(self, raw_path: Any) -> Path:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            raise ValueError("Path is required.")
+
+        alias_target = self._resolve_special_path_alias(path_text)
+        candidate = alias_target if alias_target is not None else Path(path_text).expanduser()
+        if not candidate.is_absolute():
+            candidate = self._workspace_root() / candidate
+        resolved = candidate.resolve()
+        if not self._is_in_allowed_roots(resolved):
+            allowed = ", ".join(str(item) for item in self._allowed_filesystem_roots())
+            raise ValueError(f"Path is outside allowed roots. Allowed roots: {allowed}")
+        return resolved
+
+    def _known_folder_query_aliases(self, text: str) -> list[str]:
+        lowered = str(text or "").lower()
+        aliases: list[str] = []
+        mapping: dict[str, tuple[str, ...]] = {
+            "desktop": ("desktop", "桌面"),
+            "downloads": ("downloads", "download", "下载"),
+            "documents": ("documents", "document", "docs", "文档", "文件"),
+            "pictures": ("pictures", "picture", "images", "photos", "图片", "照片"),
+            "videos": ("videos", "video", "影片", "视频"),
+            "music": ("music", "audio", "歌曲", "音乐"),
+        }
+        for canonical, keys in mapping.items():
+            if any(key in lowered for key in keys):
+                aliases.append(canonical)
+        return aliases
+
+    def _extract_path_query_terms(self, text: str) -> list[str]:
+        raw = str(text or "").strip()
+        terms: list[str] = []
+        if raw:
+            terms.append(raw)
+        for item in self._extract_query_tokens(raw):
+            terms.append(item)
+        terms.extend(self._known_folder_query_aliases(raw))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in terms:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(value)
+        return deduped
+
+    def _search_paths(
+        self,
+        *,
+        query: str,
+        base_path: Any = ".",
+        recursive: bool = True,
+        include_hidden: bool = False,
+        max_results: int = 40,
+        path_type: str = "any",
+        max_depth: int = 6,
+    ) -> list[Path]:
+        normalized_type = str(path_type or "any").strip().lower()
+        if normalized_type not in {"any", "file", "dir"}:
+            normalized_type = "any"
+
+        max_results = self._coerce_int(max_results, 40, minimum=1, maximum=200)
+        max_depth = self._coerce_int(max_depth, 6, minimum=0, maximum=20)
+
+        roots: list[Path]
+        base_text = str(base_path or "").strip()
+        if not base_text or base_text == ".":
+            roots = self._allowed_filesystem_roots()
+        else:
+            roots = [self._resolve_workspace_target(base_text)]
+
+        terms = [term.lower() for term in self._extract_path_query_terms(query)]
+        if not terms:
+            return []
+
+        hits: list[Path] = []
+        for root in roots:
+            if not root.exists() or not root.is_dir():
+                continue
+            if normalized_type in {"any", "dir"} and any(term in root.name.lower() for term in terms):
+                hits.append(root)
+                if len(hits) >= max_results:
+                    return hits
+            for current_root, dir_names, file_names in os.walk(root):
+                current = Path(current_root)
+                try:
+                    depth = len(current.relative_to(root).parts)
+                except ValueError:
+                    depth = 0
+                if depth > max_depth:
+                    dir_names[:] = []
+                    continue
+
+                if not include_hidden:
+                    dir_names[:] = [name for name in dir_names if not name.startswith(".")]
+                    file_names = [name for name in file_names if not name.startswith(".")]
+
+                names_to_check: list[tuple[str, bool]] = []
+                if normalized_type in {"any", "dir"}:
+                    names_to_check.extend((name, True) for name in dir_names)
+                if normalized_type in {"any", "file"}:
+                    names_to_check.extend((name, False) for name in file_names)
+
+                for name, is_dir in names_to_check:
+                    lowered_name = name.lower()
+                    if not any(term in lowered_name for term in terms):
+                        continue
+                    target = current / name
+                    hits.append(target)
+                    if len(hits) >= max_results:
+                        return hits
+
+                if not recursive:
+                    dir_names[:] = []
+        return hits
+
+    def _guess_existing_target(self, raw_path: Any, *, expect_dir: bool | None = None) -> Path | None:
+        text = str(raw_path or "").strip()
+        if not text:
+            return None
+
+        for alias in self._known_folder_query_aliases(text):
+            for candidate in self._known_folder_candidates(alias):
+                if not candidate.exists():
+                    continue
+                if expect_dir is True and not candidate.is_dir():
+                    continue
+                if expect_dir is False and not candidate.is_file():
+                    continue
+                if self._is_in_allowed_roots(candidate):
+                    return candidate
+
+        try:
+            direct = self._resolve_workspace_target(text)
+            if direct.exists():
+                if expect_dir is True and not direct.is_dir():
+                    return None
+                if expect_dir is False and not direct.is_file():
+                    return None
+                return direct
+        except Exception:  # noqa: BLE001
+            pass
+
+        preferred_type = "any"
+        if expect_dir is True:
+            preferred_type = "dir"
+        elif expect_dir is False:
+            preferred_type = "file"
+
+        hits = self._search_paths(
+            query=text,
+            base_path=".",
+            recursive=True,
+            include_hidden=False,
+            max_results=8,
+            path_type=preferred_type,
+            max_depth=6,
+        )
+        if not hits:
+            return None
+        hits = sorted(hits, key=lambda item: len(item.parts))
+        return hits[0]
+
+    def _coerce_bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "n", "off"}:
+                return False
+        return default
+
+    def _coerce_int(
+        self,
+        value: Any,
+        default: int,
+        *,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
+        try:
+            if isinstance(value, str):
+                parsed = int(value.strip())
+            else:
+                parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
+
+    def _builtin_filesystem_tools(self) -> list[dict[str, Any]]:
+        root = self._workspace_root()
+        base = {
+            "skill_id": "builtin_filesystem",
+            "skill_name": "Builtin Filesystem",
+            "local_path": str(root),
+            "timeout_seconds": 15,
+            "input_mode": "builtin",
+            "default_output_dir": "",
+            "execution_mode": "builtin_fs",
+            "command": [],
+        }
+        return [
+            {
+                **base,
+                "name": "fs_list_roots",
+                "description": "List all filesystem roots currently allowed for agent access.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                **base,
+                "name": "fs_search_paths",
+                "description": "Search files or directories by keyword under allowed roots.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Keyword to search."},
+                        "path": {"type": "string", "description": "Optional base path under allowed roots."},
+                        "path_type": {"type": "string", "enum": ["any", "file", "dir"]},
+                        "recursive": {"type": "boolean"},
+                        "include_hidden": {"type": "boolean"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
+                        "max_depth": {"type": "integer", "minimum": 0, "maximum": 20},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_list_directory",
+                "description": "List files and directories in the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path, relative to workspace."},
+                        "recursive": {"type": "boolean"},
+                        "include_hidden": {"type": "boolean"},
+                        "max_entries": {"type": "integer", "minimum": 1, "maximum": 1000},
+                    },
+                },
+            },
+            {
+                **base,
+                "name": "fs_read_file",
+                "description": "Read a text file from the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                        "max_chars": {"type": "integer", "minimum": 500, "maximum": 40000},
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_write_file",
+                "description": "Write text content to a file in the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "content": {"type": "string"},
+                        "overwrite": {"type": "boolean"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_append_file",
+                "description": "Append text content to a file in the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_make_directory",
+                "description": "Create a directory in the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path, relative to workspace."},
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_delete_path",
+                "description": "Delete a file or directory from the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Target path, relative to workspace."},
+                        "recursive": {"type": "boolean"},
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                **base,
+                "name": "fs_move_path",
+                "description": "Move or rename a file or directory in the workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type": "string"},
+                        "destination_path": {"type": "string"},
+                        "overwrite": {"type": "boolean"},
+                    },
+                    "required": ["source_path", "destination_path"],
+                },
+            },
+        ]
+
+    def _execute_builtin_filesystem_tool(
+        self,
+        function_name: str,
+        args: dict[str, Any],
+        tool: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        tool_meta: dict[str, Any] = {
+            "ok": False,
+            "error": None,
+            "generated_files": [],
+            "output_dir": None,
+            "skill_id": tool.get("skill_id"),
+            "skill_name": tool.get("skill_name"),
+            "required_env_vars": [],
+            "missing_env_vars": [],
+            "required_shell_dependencies": [],
+            "missing_shell_dependencies": [],
+            "auto_provisioned_shell_dependencies": [],
+            "auto_provision_errors": [],
+            "missing_launchers": [],
+            "attempt_count": 1,
+            "max_attempts": 1,
+            "retry_events": [],
+        }
+        try:
+            if function_name == "fs_list_roots":
+                roots = self._allowed_filesystem_roots()
+                lines = [f"- {str(root)}" for root in roots]
+                tool_meta["ok"] = True
+                return "Allowed filesystem roots:\n" + ("\n".join(lines) if lines else "(none)"), tool_meta
+
+            if function_name == "fs_search_paths":
+                query = str(args.get("query") or "").strip()
+                if not query:
+                    raise ValueError("query is required.")
+                hits = self._search_paths(
+                    query=query,
+                    base_path=args.get("path") or ".",
+                    recursive=self._coerce_bool(args.get("recursive"), default=True),
+                    include_hidden=self._coerce_bool(args.get("include_hidden"), default=False),
+                    max_results=self._coerce_int(args.get("max_results"), 40, minimum=1, maximum=200),
+                    path_type=str(args.get("path_type") or "any"),
+                    max_depth=self._coerce_int(args.get("max_depth"), 6, minimum=0, maximum=20),
+                )
+                lines = []
+                for item in hits:
+                    marker = "D" if item.is_dir() else "F"
+                    lines.append(f"[{marker}] {self._workspace_relative(item)}")
+                body = "\n".join(lines) if lines else "(no matches)"
+                tool_meta["ok"] = True
+                return f"Search query: {query}\nMatches: {len(hits)}\n{body}", tool_meta
+
+            if function_name == "fs_list_directory":
+                raw_path = str(args.get("path") or ".").strip()
+                try:
+                    target = self._resolve_workspace_target(raw_path)
+                except ValueError:
+                    guessed = self._guess_existing_target(raw_path, expect_dir=True)
+                    if guessed is None:
+                        raise
+                    target = guessed
+                if not target.exists() or not target.is_dir():
+                    guessed = self._guess_existing_target(raw_path, expect_dir=True)
+                    if guessed is not None:
+                        target = guessed
+                if not target.exists():
+                    raise ValueError(f"Path not found: {self._workspace_relative(target)}")
+                if not target.is_dir():
+                    raise ValueError(f"Not a directory: {self._workspace_relative(target)}")
+
+                recursive = self._coerce_bool(args.get("recursive"), default=False)
+                include_hidden = self._coerce_bool(args.get("include_hidden"), default=False)
+                max_entries = self._coerce_int(args.get("max_entries"), 200, minimum=1, maximum=1000)
+
+                entries: list[Path]
+                if recursive:
+                    entries = sorted(target.rglob("*"), key=lambda item: item.as_posix().lower())
+                else:
+                    entries = sorted(target.iterdir(), key=lambda item: item.as_posix().lower())
+
+                lines: list[str] = []
+                total_seen = 0
+                for entry in entries:
+                    if not include_hidden and any(part.startswith(".") for part in entry.parts):
+                        continue
+                    total_seen += 1
+                    if len(lines) >= max_entries:
+                        continue
+                    label = "D" if entry.is_dir() else "F"
+                    rel = self._workspace_relative(entry)
+                    if entry.is_file():
+                        try:
+                            size = entry.stat().st_size
+                        except OSError:
+                            size = 0
+                        lines.append(f"[{label}] {rel} ({size} bytes)")
+                    else:
+                        lines.append(f"[{label}] {rel}")
+
+                truncated = total_seen > len(lines)
+                root_display = self._workspace_relative(target)
+                body = "\n".join(lines) if lines else "(empty)"
+                message = (
+                    f"Directory: {root_display}\n"
+                    f"Entries shown: {len(lines)}"
+                    + (f" (truncated from {total_seen})" if truncated else "")
+                    + f"\n{body}"
+                )
+                tool_meta["ok"] = True
+                return message[:20000], tool_meta
+
+            if function_name == "fs_read_file":
+                target = self._resolve_workspace_target(args.get("path"))
+                if not target.exists():
+                    raise ValueError(f"File not found: {self._workspace_relative(target)}")
+                if not target.is_file():
+                    raise ValueError(f"Not a file: {self._workspace_relative(target)}")
+
+                raw = target.read_bytes()
+                if b"\x00" in raw[:4096]:
+                    raise ValueError("Binary file is not supported by fs_read_file.")
+                text = raw.decode("utf-8", errors="replace")
+                lines = text.splitlines()
+                total_lines = len(lines)
+
+                start_line = self._coerce_int(
+                    args.get("start_line"),
+                    1,
+                    minimum=1,
+                    maximum=max(total_lines, 1),
+                )
+                if args.get("end_line") is None:
+                    end_line = min(total_lines, start_line + 199) if total_lines > 0 else 0
+                else:
+                    end_line = self._coerce_int(
+                        args.get("end_line"),
+                        start_line,
+                        minimum=start_line,
+                        maximum=max(total_lines, start_line),
+                    )
+
+                if total_lines == 0:
+                    payload = "(empty file)"
+                    line_scope = "0-0/0"
+                else:
+                    selected = lines[start_line - 1 : end_line]
+                    numbered = [
+                        f"{index} | {value}"
+                        for index, value in enumerate(selected, start=start_line)
+                    ]
+                    payload = "\n".join(numbered)
+                    line_scope = f"{start_line}-{end_line}/{total_lines}"
+
+                max_chars = self._coerce_int(
+                    args.get("max_chars"),
+                    12000,
+                    minimum=500,
+                    maximum=40000,
+                )
+                truncated = False
+                if len(payload) > max_chars:
+                    payload = payload[:max_chars]
+                    truncated = True
+
+                message = (
+                    f"File: {self._workspace_relative(target)}\n"
+                    f"Lines: {line_scope}\n"
+                    f"{payload}"
+                    + ("\n... (truncated)" if truncated else "")
+                )
+                tool_meta["ok"] = True
+                return message, tool_meta
+
+            if function_name == "fs_write_file":
+                target = self._resolve_workspace_target(args.get("path"))
+                if target.exists() and target.is_dir():
+                    raise ValueError(f"Cannot write file because target is a directory: {self._workspace_relative(target)}")
+
+                overwrite = self._coerce_bool(args.get("overwrite"), default=True)
+                if target.exists() and not overwrite:
+                    raise ValueError(
+                        f"File already exists and overwrite is false: {self._workspace_relative(target)}"
+                    )
+
+                content = args.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                rel = self._workspace_relative(target)
+                tool_meta["generated_files"] = [rel]
+                tool_meta["ok"] = True
+                return f"Wrote file: {rel} ({len(content.encode('utf-8'))} bytes).", tool_meta
+
+            if function_name == "fs_append_file":
+                target = self._resolve_workspace_target(args.get("path"))
+                if target.exists() and target.is_dir():
+                    raise ValueError(f"Cannot append file because target is a directory: {self._workspace_relative(target)}")
+
+                content = args.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as handle:
+                    handle.write(content)
+                rel = self._workspace_relative(target)
+                tool_meta["generated_files"] = [rel]
+                tool_meta["ok"] = True
+                return f"Appended file: {rel} ({len(content.encode('utf-8'))} bytes).", tool_meta
+
+            if function_name == "fs_make_directory":
+                target = self._resolve_workspace_target(args.get("path"))
+                target.mkdir(parents=True, exist_ok=True)
+                tool_meta["ok"] = True
+                return f"Directory ready: {self._workspace_relative(target)}", tool_meta
+
+            if function_name == "fs_delete_path":
+                target = self._resolve_workspace_target(args.get("path"))
+                if not target.exists():
+                    raise ValueError(f"Path not found: {self._workspace_relative(target)}")
+                recursive = self._coerce_bool(args.get("recursive"), default=False)
+                rel = self._workspace_relative(target)
+                if target.is_dir():
+                    if recursive:
+                        shutil.rmtree(target)
+                    else:
+                        try:
+                            target.rmdir()
+                        except OSError as error:
+                            raise ValueError(
+                                "Directory is not empty. Set recursive=true to delete recursively."
+                            ) from error
+                else:
+                    target.unlink()
+                tool_meta["ok"] = True
+                return f"Deleted: {rel}", tool_meta
+
+            if function_name == "fs_move_path":
+                source = self._resolve_workspace_target(args.get("source_path"))
+                destination = self._resolve_workspace_target(args.get("destination_path"))
+                if not source.exists():
+                    raise ValueError(f"Source path not found: {self._workspace_relative(source)}")
+                if source == destination:
+                    raise ValueError("Source and destination are the same path.")
+
+                overwrite = self._coerce_bool(args.get("overwrite"), default=False)
+                if destination.exists():
+                    if not overwrite:
+                        raise ValueError(
+                            f"Destination already exists and overwrite is false: {self._workspace_relative(destination)}"
+                        )
+                    if destination.is_dir():
+                        shutil.rmtree(destination)
+                    else:
+                        destination.unlink()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
+                rel = self._workspace_relative(destination)
+                tool_meta["generated_files"] = [rel]
+                tool_meta["ok"] = True
+                return f"Moved: {self._workspace_relative(source)} -> {rel}", tool_meta
+
+            raise ValueError(f"Unsupported builtin tool: {function_name}")
+        except Exception as error:  # noqa: BLE001
+            message = str(error).strip() or f"Builtin tool '{function_name}' failed."
+            tool_meta["error"] = message
+            return message[:1200], tool_meta
 
     def build_skill_preflight(self, skill: Any) -> dict[str, Any]:
         skill_id = str(getattr(skill, "id", "") or "").strip()
@@ -1262,12 +2027,58 @@ class LLMGateway:
             tokens.add(chunk)
         return tokens
 
+    def _looks_like_filesystem_intent(self, text: str) -> bool:
+        lowered = text.lower()
+        keyword_hits = (
+            "file",
+            "files",
+            "folder",
+            "directory",
+            "dir",
+            "path",
+            "read",
+            "write",
+            "edit",
+            "modify",
+            "create",
+            "delete",
+            "remove",
+            "rename",
+            "move",
+            "list",
+            "code",
+            "repo",
+            "project",
+            "目录",
+            "文件",
+            "读取",
+            "查看",
+            "写入",
+            "修改",
+            "创建",
+            "删除",
+            "重命名",
+            "移动",
+            "代码",
+            "工程",
+        )
+        if any(keyword in lowered for keyword in keyword_hits):
+            return True
+        return bool(
+            re.search(
+                r"([a-zA-Z]:\\|[\\/][^\\/\s]+|\.{1,2}[\\/]|[a-zA-Z0-9_-]+\.(py|js|ts|tsx|json|md|yaml|yml|txt))",
+                text,
+            )
+        )
+
     def _infer_intent_labels(self, text: str) -> set[str]:
         lowered = text.lower()
         labels: set[str] = set()
         for label, keywords in self._INTENT_KEYWORDS_V2.items():
             if any(keyword in lowered for keyword in keywords):
                 labels.add(label)
+        if self._looks_like_filesystem_intent(text):
+            labels.add("filesystem")
         return labels
 
     def _score_tool_relevance(
@@ -1323,7 +2134,11 @@ class LLMGateway:
             scored.append((score, tool, debug))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        selected = [item for score, item, _ in scored if score > 0][:6]
+        selected = [item for score, item, _ in scored if score > 0][:8]
+        if not selected and self._looks_like_filesystem_intent(user_input):
+            selected = [
+                item for _, item, _ in scored if str(item.get("execution_mode") or "") == "builtin_fs"
+            ][:8]
         debug_rows = [debug for _, _, debug in scored]
         return selected, debug_rows
 
@@ -1530,14 +2345,18 @@ class LLMGateway:
         if self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
 
-        filtered_skills, matching_debug = self._select_relevant_tools(user_input, executable_skills)
+        builtin_tools = self._builtin_filesystem_tools()
+        available_tools = [*executable_skills, *builtin_tools]
+        filtered_skills, matching_debug = self._select_relevant_tools(user_input, available_tools)
         if trace_hook is not None:
             trace_hook(
                 {
                     "stage": "tool_candidates",
                     "agent_id": agent.id,
                     "agent_name": agent.name,
-                    "available_count": len(executable_skills),
+                    "available_count": len(available_tools),
+                    "skill_tool_count": len(executable_skills),
+                    "builtin_tool_count": len(builtin_tools),
                     "selected_count": len(filtered_skills),
                     "matching": matching_debug,
                 }
@@ -1571,7 +2390,10 @@ class LLMGateway:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_input},
         ]
-        must_call_tool = True
+        must_call_tool = any(
+            str(item.get("execution_mode") or "") != "builtin_fs"
+            for item in filtered_skills
+        )
 
         for _ in range(4):
             response = self.client.chat.completions.create(
@@ -1784,6 +2606,9 @@ class LLMGateway:
                 "skill_id": None,
                 "skill_name": None,
             }
+
+        if str(tool.get("execution_mode") or "").strip() == "builtin_fs":
+            return self._execute_builtin_filesystem_tool(function_name, args, tool)
 
         cwd = tool["local_path"]
         command = list(tool["command"])
