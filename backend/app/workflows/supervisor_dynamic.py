@@ -163,6 +163,7 @@ def run_supervisor_dynamic(
     store: InMemoryPlaygroundStore,
     workflow: WorkflowDefinition,
     user_input: str,
+    history: list[dict[str, str]] | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
     workers: list[AgentDefinition] = []
@@ -434,6 +435,7 @@ def run_supervisor_dynamic(
             worker_answer = llm_gateway.run_agent(
                 worker,
                 worker_input,
+                history=history,
                 trace_hook=make_tool_trace_hook(worker),
             )
             reports.append(f"Cycle {cycle} by {worker.name}:\n{worker_answer}")

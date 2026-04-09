@@ -60,6 +60,26 @@ class LLMGateway:
             "排版",
             "生成图片",
         ),
+        "filesystem": (
+            "file",
+            "files",
+            "folder",
+            "directory",
+            "path",
+            "desktop",
+            "download",
+            "downloads",
+            "read file",
+            "list files",
+            "文件",
+            "文件夹",
+            "目录",
+            "路径",
+            "桌面",
+            "下载",
+            "读取文件",
+            "列出文件",
+        ),
     }
     _ENV_IGNORE: set[str] = {
         "PATH",
@@ -152,18 +172,41 @@ class LLMGateway:
             "排版",
             "生成图片",
         ),
+        "filesystem": (
+            "file",
+            "files",
+            "folder",
+            "directory",
+            "path",
+            "desktop",
+            "download",
+            "downloads",
+            "read file",
+            "list files",
+            "文件",
+            "文件夹",
+            "目录",
+            "路径",
+            "桌面",
+            "下载",
+            "读取文件",
+            "列出文件",
+        ),
     }
 
     def __init__(self) -> None:
-        self.api_configured = bool(settings.OPENAI_API_KEY)
         self._prepared_node_dirs: set[str] = set()
         self._prepared_python_dirs: set[str] = set()
         self._tool_env_cache: dict[str, list[str]] = {}
         self._shell_deps_cache: dict[str, list[str]] = {}
-        self._runtime_root = (
-            Path(__file__).resolve().parents[1] / ".runtime"
-        )
+        self._runtime_root = Path(settings.APP_HOME).resolve() / ".runtime"
         self._runtime_root.mkdir(parents=True, exist_ok=True)
+        self.client = None
+        self.api_configured = False
+        self.refresh_client()
+
+    def refresh_client(self) -> None:
+        self.api_configured = bool(settings.OPENAI_API_KEY)
         self.client = (
             OpenAI(
                 api_key=settings.OPENAI_API_KEY,
@@ -307,18 +350,23 @@ class LLMGateway:
         self,
         agent: AgentDefinition,
         user_input: str,
+        history: list[dict[str, str]] | None = None,
         trace_hook: ToolTraceHook | None = None,
     ) -> str:
         system_prompt = self._compose_system_prompt(agent)
         enabled_skills = store.get_skills_by_ids(agent.skill_ids)
-        executable_skills = self._get_executable_skills(enabled_skills)
+        executable_tools = [
+            *self._get_builtin_tools(agent),
+            *self._get_executable_skills(enabled_skills),
+        ]
         if not self.api_configured or self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
         return self._run_agent_with_tools(
             agent=agent,
             user_input=user_input,
             system_prompt=system_prompt,
-            executable_skills=executable_skills,
+            executable_tools=executable_tools,
+            history=history,
             trace_hook=trace_hook,
         )
 
@@ -378,22 +426,34 @@ class LLMGateway:
         return selected.id, "当前处于无 API Key 的演示模式，使用关键词路由。"
 
     def _compose_system_prompt(self, agent: AgentDefinition) -> str:
-        if not agent.skill_ids:
-            return agent.system_prompt
-
         skills = store.get_skills_by_ids(agent.skill_ids)
-        if not skills:
-            return agent.system_prompt
+        builtins = [
+            str(item).strip()
+            for item in (getattr(agent, "builtin_capabilities", None) or [])
+            if str(item).strip()
+        ]
 
-        skill_lines = "\n".join(
-            f"- {skill.name}: {skill.instruction}"
-            for skill in skills
-        )
-        return (
-            f"{agent.system_prompt}\n\n"
-            "Enabled skills:\n"
-            f"{skill_lines}"
-        )
+        sections = [agent.system_prompt]
+
+        if builtins:
+            sections.append(
+                "Enabled built-in capabilities:\n"
+                + "\n".join(f"- {capability}" for capability in builtins)
+                + "\nUse built-in capabilities directly whenever they help inspect, read, or modify local files. "
+                  "Do not merely describe the steps if a suitable built-in capability is available."
+            )
+
+        if skills:
+            skill_lines = "\n".join(
+                f"- {skill.name}: {skill.instruction}"
+                for skill in skills
+            )
+            sections.append(
+                "Enabled skills:\n"
+                f"{skill_lines}"
+            )
+
+        return "\n\n".join(section for section in sections if section)
 
     def _get_executable_skills(self, skills: list[Any]) -> list[dict[str, Any]]:
         executable: list[dict[str, Any]] = []
@@ -429,6 +489,7 @@ class LLMGateway:
 
             executable.append(
                 {
+                    "tool_kind": "skill",
                     "skill_id": skill.id,
                     "skill_name": skill.name,
                     "local_path": str(local_dir),
@@ -1220,6 +1281,110 @@ class LLMGateway:
             tool_meta["error"] = message
             return message[:1200], tool_meta
 
+    def _get_builtin_tools(self, agent: AgentDefinition) -> list[dict[str, Any]]:
+        capabilities = {
+            str(item).strip()
+            for item in (getattr(agent, "builtin_capabilities", None) or [])
+            if str(item).strip()
+        }
+        tools: list[dict[str, Any]] = []
+
+        if "fs_list" in capabilities:
+            tools.append(
+                {
+                    "tool_kind": "builtin",
+                    "builtin_capability": "fs_list",
+                    "name": "builtin_list_directory",
+                    "skill_id": None,
+                    "skill_name": "Built-in Filesystem",
+                    "description": (
+                        "List files and folders in a directory path. "
+                        "用于查看目录、桌面、下载目录中的文件和文件夹。"
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Directory path to inspect.",
+                            },
+                            "include_hidden": {
+                                "type": "boolean",
+                                "description": "Whether to include hidden files.",
+                            },
+                            "recursive": {
+                                "type": "boolean",
+                                "description": "Whether to traverse subdirectories recursively.",
+                            },
+                            "max_entries": {
+                                "type": "integer",
+                                "description": "Maximum number of entries to return.",
+                            },
+                        },
+                    },
+                }
+            )
+
+        if "fs_read" in capabilities:
+            tools.append(
+                {
+                    "tool_kind": "builtin",
+                    "builtin_capability": "fs_read",
+                    "name": "builtin_read_file",
+                    "skill_id": None,
+                    "skill_name": "Built-in Filesystem",
+                    "description": (
+                        "Read a text file from a path. "
+                        "用于读取本地文本文件内容。"
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path to read.",
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "Maximum number of characters to return.",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                }
+            )
+
+        if "fs_write" in capabilities:
+            tools.append(
+                {
+                    "tool_kind": "builtin",
+                    "builtin_capability": "fs_write",
+                    "name": "builtin_write_file",
+                    "skill_id": None,
+                    "skill_name": "Built-in Filesystem",
+                    "description": (
+                        "Write text content to a file path. "
+                        "用于创建或覆盖本地文本文件。"
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Target file path.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Text content to write.",
+                            },
+                        },
+                        "required": ["path", "content"],
+                    },
+                }
+            )
+
+        return tools
+
     def build_skill_preflight(self, skill: Any) -> dict[str, Any]:
         skill_id = str(getattr(skill, "id", "") or "").strip()
         skill_name = str(getattr(skill, "name", "") or "").strip()
@@ -1479,8 +1644,22 @@ class LLMGateway:
 
     def _default_runtime_env(self) -> dict[str, str]:
         env_map = dict(os.environ)
-        env_path = Path(settings.PROJECT_ROOT) / ".env"
-        if env_path.exists() and env_path.is_file():
+        env_candidates = [
+            Path(settings.APP_ENV_PATH),
+            Path(settings.APP_HOME) / ".env",
+            Path(settings.PROJECT_ROOT) / ".env",
+        ]
+        seen_env_paths: set[str] = set()
+        for env_path in env_candidates:
+            try:
+                normalized = str(env_path.resolve())
+            except OSError:
+                normalized = str(env_path)
+            if normalized in seen_env_paths:
+                continue
+            seen_env_paths.add(normalized)
+            if not env_path.exists() or not env_path.is_file():
+                continue
             try:
                 loaded = dotenv_values(env_path)
             except Exception:  # noqa: BLE001
@@ -2134,11 +2313,28 @@ class LLMGateway:
             scored.append((score, tool, debug))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        selected = [item for score, item, _ in scored if score > 0][:8]
-        if not selected and self._looks_like_filesystem_intent(user_input):
-            selected = [
-                item for _, item, _ in scored if str(item.get("execution_mode") or "") == "builtin_fs"
-            ][:8]
+        selected_builtins = [
+            item
+            for _, item, _ in scored
+            if str(item.get("tool_kind") or "") == "builtin"
+        ]
+        selected_scored = [
+            item
+            for score, item, _ in scored
+            if str(item.get("tool_kind") or "") != "builtin" and score > 0
+        ]
+        selected = [*selected_builtins, *selected_scored[: max(0, 8 - len(selected_builtins))]]
+        if self._looks_like_filesystem_intent(user_input):
+            builtin_fs = [
+                item
+                for _, item, _ in scored
+                if str(item.get("execution_mode") or "") == "builtin_fs"
+            ]
+            for item in builtin_fs:
+                if len(selected) >= 8:
+                    break
+                if item not in selected:
+                    selected.append(item)
         debug_rows = [debug for _, _, debug in scored]
         return selected, debug_rows
 
@@ -2339,14 +2535,15 @@ class LLMGateway:
         agent: AgentDefinition,
         user_input: str,
         system_prompt: str,
-        executable_skills: list[dict[str, Any]],
+        executable_tools: list[dict[str, Any]],
+        history: list[dict[str, str]] | None = None,
         trace_hook: ToolTraceHook | None = None,
     ) -> str:
         if self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
 
         builtin_tools = self._builtin_filesystem_tools()
-        available_tools = [*executable_skills, *builtin_tools]
+        available_tools = [*executable_tools, *builtin_tools]
         filtered_skills, matching_debug = self._select_relevant_tools(user_input, available_tools)
         if trace_hook is not None:
             trace_hook(
@@ -2355,21 +2552,24 @@ class LLMGateway:
                     "agent_id": agent.id,
                     "agent_name": agent.name,
                     "available_count": len(available_tools),
-                    "skill_tool_count": len(executable_skills),
+                    "skill_tool_count": len(executable_tools),
                     "builtin_tool_count": len(builtin_tools),
                     "selected_count": len(filtered_skills),
                     "matching": matching_debug,
                 }
             )
 
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        if history:
+            for msg in history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": user_input})
+
         if not filtered_skills:
             response = self.client.chat.completions.create(
                 model=agent.model or settings.OPENAI_MODEL,
                 temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_input},
-                ],
+                messages=messages,
             )
             return (response.choices[0].message.content or "").strip()
 
@@ -2386,12 +2586,9 @@ class LLMGateway:
             for item in filtered_skills
         ]
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input},
-        ]
         must_call_tool = any(
-            str(item.get("execution_mode") or "") != "builtin_fs"
+            str(item.get("tool_kind") or "") == "builtin"
+            or str(item.get("execution_mode") or "") != "builtin_fs"
             for item in filtered_skills
         )
 
@@ -2462,7 +2659,7 @@ class LLMGateway:
                     )
 
                 started_at = time.perf_counter()
-                tool_result, tool_meta = self._execute_local_skill_tool(function_name, args, tool_registry)
+                tool_result, tool_meta = self._execute_tool(function_name, args, tool_registry)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
 
                 retry_events = tool_meta.get("retry_events", [])
@@ -2551,6 +2748,179 @@ class LLMGateway:
 
         return self._fallback_agent_response(agent, user_input, system_prompt)
 
+    def _execute_tool(
+        self,
+        function_name: str,
+        args: dict[str, Any],
+        tool_registry: dict[str, dict[str, Any]],
+    ) -> tuple[str, dict[str, Any]]:
+        tool = tool_registry.get(function_name)
+        if not tool:
+            message = f"Tool '{function_name}' is not registered."
+            return message, {
+                "ok": False,
+                "error": message,
+                "generated_files": [],
+                "output_dir": None,
+                "skill_id": None,
+                "skill_name": None,
+            }
+
+        if str(tool.get("tool_kind") or "skill") == "builtin":
+            return self._execute_builtin_tool(function_name, args, tool)
+        return self._execute_local_skill_tool(function_name, args, tool_registry)
+
+    def _expand_builtin_path(self, raw_path: str) -> Path:
+        value = str(raw_path or "").strip()
+        if not value:
+            return Path.home()
+
+        lowered = value.lower()
+        aliases = {
+            "desktop": Path.home() / "Desktop",
+            "桌面": Path.home() / "Desktop",
+            "downloads": Path.home() / "Downloads",
+            "download": Path.home() / "Downloads",
+            "下载": Path.home() / "Downloads",
+            "~": Path.home(),
+        }
+        if lowered in aliases:
+            return aliases[lowered]
+
+        expanded = Path(value).expanduser()
+        if expanded.is_absolute():
+            return expanded
+        return (Path.cwd() / expanded).resolve()
+
+    def _execute_builtin_tool(
+        self,
+        function_name: str,
+        args: dict[str, Any],
+        tool: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        capability = str(tool.get("builtin_capability") or "").strip()
+        tool_meta: dict[str, Any] = {
+            "ok": False,
+            "error": None,
+            "generated_files": [],
+            "output_dir": None,
+            "skill_id": None,
+            "skill_name": tool.get("skill_name"),
+            "required_env_vars": [],
+            "missing_env_vars": [],
+            "required_shell_dependencies": [],
+            "missing_shell_dependencies": [],
+            "auto_provisioned_shell_dependencies": [],
+            "auto_provision_errors": [],
+            "missing_launchers": [],
+            "attempt_count": 1,
+            "max_attempts": 1,
+            "retry_events": [],
+            "builtin_capability": capability,
+        }
+
+        try:
+            if capability == "fs_list":
+                target_path = self._expand_builtin_path(
+                    str(args.get("path") or args.get("directory") or "").strip()
+                )
+                include_hidden = bool(args.get("include_hidden"))
+                recursive = bool(args.get("recursive"))
+                try:
+                    max_entries = int(args.get("max_entries") or 200)
+                except (TypeError, ValueError):
+                    max_entries = 200
+                max_entries = max(1, min(max_entries, 500))
+
+                if not target_path.exists():
+                    raise FileNotFoundError(f"Path does not exist: {target_path}")
+                if not target_path.is_dir():
+                    raise NotADirectoryError(f"Path is not a directory: {target_path}")
+
+                if recursive:
+                    iterator = sorted(target_path.rglob("*"))
+                else:
+                    iterator = sorted(target_path.iterdir())
+
+                entries: list[dict[str, Any]] = []
+                for item in iterator:
+                    name = item.name
+                    if not include_hidden and name.startswith("."):
+                        continue
+                    try:
+                        relative = item.relative_to(target_path).as_posix()
+                    except ValueError:
+                        relative = name
+                    entries.append(
+                        {
+                            "name": name,
+                            "relative_path": relative,
+                            "type": "directory" if item.is_dir() else "file",
+                            "size": None if item.is_dir() else item.stat().st_size,
+                        }
+                    )
+                    if len(entries) >= max_entries:
+                        break
+
+                tool_meta["ok"] = True
+                return json.dumps(
+                    {
+                        "path": str(target_path),
+                        "entry_count": len(entries),
+                        "recursive": recursive,
+                        "entries": entries,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ), tool_meta
+
+            if capability == "fs_read":
+                target_path = self._expand_builtin_path(str(args.get("path") or "").strip())
+                try:
+                    max_chars = int(args.get("max_chars") or 12000)
+                except (TypeError, ValueError):
+                    max_chars = 12000
+                max_chars = max(200, min(max_chars, 40000))
+
+                if not target_path.exists():
+                    raise FileNotFoundError(f"File does not exist: {target_path}")
+                if not target_path.is_file():
+                    raise IsADirectoryError(f"Path is not a file: {target_path}")
+
+                content = target_path.read_text(encoding="utf-8", errors="replace")
+                truncated = len(content) > max_chars
+                tool_meta["ok"] = True
+                return json.dumps(
+                    {
+                        "path": str(target_path),
+                        "truncated": truncated,
+                        "content": content[:max_chars],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ), tool_meta
+
+            if capability == "fs_write":
+                target_path = self._expand_builtin_path(str(args.get("path") or "").strip())
+                content = str(args.get("content") or "")
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(content, encoding="utf-8")
+                tool_meta["ok"] = True
+                return json.dumps(
+                    {
+                        "path": str(target_path),
+                        "written_chars": len(content),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ), tool_meta
+
+            raise ValueError(f"Unsupported builtin capability: {capability}")
+        except Exception as error:  # noqa: BLE001
+            message = str(error).strip() or f"Builtin tool '{function_name}' failed."
+            tool_meta["error"] = message[:1200]
+            return f"Tool '{function_name}' failed: {message[:1200]}", tool_meta
+
     def _build_tool_blocked_message(
         self,
         *,
@@ -2606,6 +2976,9 @@ class LLMGateway:
                 "skill_id": None,
                 "skill_name": None,
             }
+
+        if str(tool.get("tool_kind") or "").strip() == "builtin":
+            return self._execute_builtin_tool(function_name, args, tool)
 
         if str(tool.get("execution_mode") or "").strip() == "builtin_fs":
             return self._execute_builtin_filesystem_tool(function_name, args, tool)

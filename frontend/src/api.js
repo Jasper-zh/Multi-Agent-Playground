@@ -1,5 +1,24 @@
+function resolveApiBaseUrl() {
+  const runtimeConfig = globalThis?.__AGENT_PLAYGROUND_CONFIG__;
+  const injected = String(runtimeConfig?.apiBaseUrl || "").trim();
+  if (injected) return injected.replace(/\/+$/, "");
+
+  const envBase = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  return "";
+}
+
+function resolveApiUrl(path) {
+  const normalizedPath = String(path || "");
+  const baseUrl = resolveApiBaseUrl();
+  if (!baseUrl) return normalizedPath;
+  if (!normalizedPath.startsWith("/")) return `${baseUrl}/${normalizedPath}`;
+  return `${baseUrl}${normalizedPath}`;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(resolveApiUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
@@ -26,6 +45,17 @@ async function request(path, options = {}) {
 
 export function fetchTemplates() {
   return request("/api/workflow-templates");
+}
+
+export function fetchAppSettings() {
+  return request("/api/settings");
+}
+
+export function updateAppSettings(payload) {
+  return request("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function fetchSkills() {
@@ -99,6 +129,28 @@ export function runWorkflow(payload) {
   });
 }
 
+export function fetchConversations(workflowId) {
+  const query = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : "";
+  return request(`/api/conversations${query}`);
+}
+
+export function createConversation(workflowId) {
+  return request("/api/conversations", {
+    method: "POST",
+    body: JSON.stringify({ workflow_id: workflowId }),
+  });
+}
+
+export function fetchConversation(conversationId) {
+  return request(`/api/conversations/${conversationId}`);
+}
+
+export function deleteConversation(conversationId) {
+  return request(`/api/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+}
+
 function parseSseFrame(frame) {
   const lines = frame.split(/\r?\n/);
   let eventName = "message";
@@ -126,7 +178,7 @@ export async function runWorkflowStream(
   payload,
   { onTrace, onFinal, onError, onEnd, signal } = {},
 ) {
-  const response = await fetch("/api/runs/stream", {
+  const response = await fetch(resolveApiUrl("/api/runs/stream"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

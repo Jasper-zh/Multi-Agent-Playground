@@ -4,14 +4,19 @@ import hashlib
 import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .settings_bridge import settings
 from .schemas import (
     AgentDefinition,
     AgentDefinitionCreate,
     AgentDefinitionUpdate,
+    Conversation,
+    ConversationCreate,
+    Message,
     SkillDefinition,
     SkillDefinitionCreate,
     WorkflowDefinition,
@@ -27,12 +32,36 @@ def _new_id(prefix: str) -> str:
 
 class SQLitePlaygroundStore:
     def __init__(self, db_path: Path | None = None) -> None:
-        app_root = Path(__file__).resolve().parents[1]
-        self.db_path = db_path or (app_root / "data" / "agent_playground.db")
-        self.skills_root = app_root / "skills"
+        app_home = Path(settings.APP_HOME).resolve()
+        bundled_skills_root = Path(settings.BUNDLED_SKILLS_ROOT).resolve()
+        self.app_home = app_home
+        self.db_path = db_path or (app_home / "data" / "agent_playground.db")
+        self.skills_root = app_home / "skills"
+        self.bundled_skills_root = bundled_skills_root
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.skills_root.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    def _iter_skill_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for root in (self.bundled_skills_root, self.skills_root):
+            normalized = str(root.resolve())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            roots.append(root)
+        return roots
+
+    def _resolve_skill_root_for_path(self, skill_dir: Path) -> Path:
+        resolved = skill_dir.resolve()
+        for root in self._iter_skill_roots():
+            try:
+                resolved.relative_to(root.resolve())
+                return root
+            except (OSError, ValueError):
+                continue
+        return self.skills_root
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -69,6 +98,12 @@ class SQLitePlaygroundStore:
                 connection,
                 "agents",
                 "skill_ids",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                connection,
+                "agents",
+                "builtin_capabilities",
                 "TEXT NOT NULL DEFAULT '[]'",
             )
             connection.execute(
@@ -113,6 +148,35 @@ class SQLitePlaygroundStore:
                 ON skills(source_provider, source_skill_id)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    title TEXT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    agent_name TEXT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
+                ON messages(conversation_id)
+                """
+            )
 
     def _rename_default_workflow_names(self) -> None:
         rename_pairs = [
@@ -139,6 +203,13 @@ class SQLitePlaygroundStore:
         if not isinstance(skill_ids, list):
             skill_ids = []
 
+        try:
+            builtin_capabilities = json.loads(row["builtin_capabilities"])
+        except (TypeError, json.JSONDecodeError, KeyError):
+            builtin_capabilities = []
+        if not isinstance(builtin_capabilities, list):
+            builtin_capabilities = []
+
         return AgentDefinition(
             id=row["id"],
             name=row["name"],
@@ -146,6 +217,11 @@ class SQLitePlaygroundStore:
             system_prompt=row["system_prompt"],
             model=row["model"],
             skill_ids=skill_ids,
+            builtin_capabilities=[
+                str(item).strip()
+                for item in builtin_capabilities
+                if str(item).strip()
+            ],
         )
 
     def _row_to_skill(self, row: sqlite3.Row) -> SkillDefinition:
@@ -169,13 +245,14 @@ class SQLitePlaygroundStore:
         if (legacy_dir / "skill.json").exists():
             return legacy_dir
 
-        for skill_json in self.skills_root.rglob("skill.json"):
-            try:
-                payload = json.loads(skill_json.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(payload, dict) and str(payload.get("id") or "").strip() == skill_id:
-                return skill_json.parent
+        for root in self._iter_skill_roots():
+            for skill_json in root.rglob("skill.json"):
+                try:
+                    payload = json.loads(skill_json.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict) and str(payload.get("id") or "").strip() == skill_id:
+                    return skill_json.parent
         return None
 
     def _resolve_skill_dir(self, skill_id: str, name: str) -> Path:
@@ -458,7 +535,8 @@ class SQLitePlaygroundStore:
 
         parsed_name, parsed_description = self._parse_skill_frontmatter(content)
 
-        relative = skill_dir.relative_to(self.skills_root).as_posix()
+        skill_root = self._resolve_skill_root_for_path(skill_dir)
+        relative = skill_dir.relative_to(skill_root).as_posix()
         stable_hash = hashlib.sha1(relative.encode("utf-8")).hexdigest()[:12]
         skill_id = f"local_{stable_hash}"
 
@@ -623,7 +701,7 @@ class SQLitePlaygroundStore:
         else:
             return None
 
-        default_output_dir = str((self.skills_root.parent / "generated" / skill_id).resolve())
+        default_output_dir = str((self.app_home / "generated" / skill_id).resolve())
         return {
             "name": f"{skill_name}-tool",
             "description": description or f"Run local skill {skill_name}",
@@ -636,17 +714,18 @@ class SQLitePlaygroundStore:
 
     def _load_file_skills(self) -> dict[str, SkillDefinition]:
         loaded: dict[str, SkillDefinition] = {}
-        for skill_json in self.skills_root.rglob("skill.json"):
-            skill = self._read_file_skill(skill_json)
-            if skill is None:
-                continue
-            loaded[skill.id] = skill
-        for skill_md in self.skills_root.rglob("SKILL.md"):
-            markdown_skill = self._read_markdown_skill(skill_md)
-            if markdown_skill is None:
-                continue
-            if markdown_skill.id not in loaded:
-                loaded[markdown_skill.id] = markdown_skill
+        for root in self._iter_skill_roots():
+            for skill_json in root.rglob("skill.json"):
+                skill = self._read_file_skill(skill_json)
+                if skill is None:
+                    continue
+                loaded[skill.id] = skill
+            for skill_md in root.rglob("SKILL.md"):
+                markdown_skill = self._read_markdown_skill(skill_md)
+                if markdown_skill is None:
+                    continue
+                if markdown_skill.id not in loaded:
+                    loaded[markdown_skill.id] = markdown_skill
         return loaded
 
     def _normalize_skill_ref(self, value: str) -> str:
@@ -669,13 +748,15 @@ class SQLitePlaygroundStore:
             local_name = Path(local_path).name
             if local_name:
                 aliases.add(self._normalize_skill_ref(local_name))
-            try:
-                relative = Path(local_path).resolve().relative_to(self.skills_root.resolve())
-                relative_norm = self._normalize_skill_ref(relative.as_posix())
-                aliases.add(relative_norm)
-                aliases.add(self._normalize_skill_ref(relative.name))
-            except (OSError, ValueError):
-                pass
+            for root in self._iter_skill_roots():
+                try:
+                    relative = Path(local_path).resolve().relative_to(root.resolve())
+                    relative_norm = self._normalize_skill_ref(relative.as_posix())
+                    aliases.add(relative_norm)
+                    aliases.add(self._normalize_skill_ref(relative.name))
+                    break
+                except (OSError, ValueError):
+                    continue
 
         return {alias for alias in aliases if alias}
 
@@ -785,7 +866,7 @@ class SQLitePlaygroundStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, name, description, system_prompt, model, skill_ids
+                SELECT id, name, description, system_prompt, model, skill_ids, builtin_capabilities
                 FROM agents
                 ORDER BY created_at ASC, id ASC
                 """
@@ -796,7 +877,7 @@ class SQLitePlaygroundStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, name, description, system_prompt, model, skill_ids
+                SELECT id, name, description, system_prompt, model, skill_ids, builtin_capabilities
                 FROM agents
                 WHERE id = ?
                 """,
@@ -809,8 +890,10 @@ class SQLitePlaygroundStore:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO agents (id, name, description, system_prompt, model, skill_ids)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO agents (
+                    id, name, description, system_prompt, model, skill_ids, builtin_capabilities
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent.id,
@@ -819,6 +902,7 @@ class SQLitePlaygroundStore:
                     agent.system_prompt,
                     agent.model,
                     json.dumps(agent.skill_ids),
+                    json.dumps(agent.builtin_capabilities),
                 ),
             )
         return agent
@@ -830,7 +914,7 @@ class SQLitePlaygroundStore:
             connection.execute(
                 """
                 UPDATE agents
-                SET name = ?, description = ?, system_prompt = ?, model = ?, skill_ids = ?
+                SET name = ?, description = ?, system_prompt = ?, model = ?, skill_ids = ?, builtin_capabilities = ?
                 WHERE id = ?
                 """,
                 (
@@ -839,6 +923,7 @@ class SQLitePlaygroundStore:
                     payload.system_prompt,
                     payload.model,
                     json.dumps(payload.skill_ids),
+                    json.dumps(payload.builtin_capabilities),
                     agent_id,
                 ),
             )
@@ -1165,6 +1250,199 @@ class SQLitePlaygroundStore:
             ),
         ]
 
+    # ============ Conversation CRUD ============
+
+    def _row_to_conversation(self, row: sqlite3.Row) -> Conversation:
+        return Conversation(
+            id=row["id"],
+            workflow_id=row["workflow_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_message(self, row: sqlite3.Row) -> Message:
+        return Message(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            role=row["role"],
+            content=row["content"],
+            agent_name=row["agent_name"],
+            created_at=row["created_at"],
+        )
+
+    def list_conversations(self, workflow_id: str | None = None) -> list[Conversation]:
+        with self._connect() as connection:
+            if workflow_id:
+                rows = connection.execute(
+                    """
+                    SELECT id, workflow_id, title, created_at, updated_at
+                    FROM conversations
+                    WHERE workflow_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (workflow_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT id, workflow_id, title, created_at, updated_at
+                    FROM conversations
+                    ORDER BY updated_at DESC
+                    """
+                ).fetchall()
+        return [self._row_to_conversation(row) for row in rows]
+
+    def get_conversation(self, conversation_id: str) -> Conversation | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, workflow_id, title, created_at, updated_at
+                FROM conversations
+                WHERE id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+        return self._row_to_conversation(row) if row else None
+
+    def get_conversation_with_messages(self, conversation_id: str) -> Conversation | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        messages = self.list_messages(conversation_id)
+        return Conversation(
+            id=conversation.id,
+            workflow_id=conversation.workflow_id,
+            title=conversation.title,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+            messages=messages,
+        )
+
+    def create_conversation(self, payload: ConversationCreate) -> Conversation:
+        conversation_id = _new_id("conv")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversations (id, workflow_id, title, created_at, updated_at)
+                VALUES (?, ?, NULL, ?, ?)
+                """,
+                (conversation_id, payload.workflow_id, now, now),
+            )
+        return Conversation(
+            id=conversation_id,
+            workflow_id=payload.workflow_id,
+            title=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def update_conversation_title(self, conversation_id: str, title: str) -> Conversation | None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE conversations
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (title, now, conversation_id),
+            )
+        return self.get_conversation(conversation_id)
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM messages WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM conversations WHERE id = ?
+                """,
+                (conversation_id,),
+            )
+            return cursor.rowcount > 0
+
+    # ============ Message CRUD ============
+
+    def list_messages(self, conversation_id: str, limit: int | None = None) -> list[Message]:
+        with self._connect() as connection:
+            if limit:
+                rows = connection.execute(
+                    """
+                    SELECT id, conversation_id, role, content, agent_name, created_at
+                    FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (conversation_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT id, conversation_id, role, content, agent_name, created_at
+                    FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (conversation_id,),
+                ).fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    def create_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        agent_name: str | None = None,
+    ) -> Message:
+        message_id = _new_id("msg")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO messages (id, conversation_id, role, content, agent_name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, conversation_id, role, content, agent_name, now),
+            )
+            connection.execute(
+                """
+                UPDATE conversations SET updated_at = ? WHERE id = ?
+                """,
+                (now, conversation_id),
+            )
+        return Message(
+            id=message_id,
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            agent_name=agent_name,
+            created_at=now,
+        )
+
+    def get_recent_messages(self, conversation_id: str, limit: int = 2) -> list[Message]:
+        """获取最近N条消息（用于上下文）"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, conversation_id, role, content, agent_name, created_at
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            ).fetchall()
+        messages = [self._row_to_message(row) for row in rows]
+        messages.reverse()  # 按时间正序返回
+        return messages
+
     def seed_defaults(self) -> None:
         self._rename_default_workflow_names()
 
@@ -1259,6 +1537,7 @@ class SQLitePlaygroundStore:
                     system_prompt=spec["system_prompt"],
                     model=agent.model,
                     skill_ids=desired_skill_ids,
+                    builtin_capabilities=agent.builtin_capabilities,
                 ),
             )
         agents = self.list_agents()
@@ -1271,6 +1550,7 @@ class SQLitePlaygroundStore:
                         description=spec["description"],
                         system_prompt=spec["system_prompt"],
                         skill_ids=resolve_skill_ids(spec["skill_names"]),
+                        builtin_capabilities=[],
                     )
                 )
             agents = self.list_agents()

@@ -123,6 +123,7 @@ def run_router_specialists(
     store: InMemoryPlaygroundStore,
     workflow: WorkflowDefinition,
     user_input: str,
+    history: list[dict[str, str]] | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
     agents: list[AgentDefinition] = []
@@ -341,6 +342,7 @@ def run_router_specialists(
             specialist_answer = llm_gateway.run_agent(
                 agent,
                 state["user_input"],
+                history=history,
                 trace_hook=make_tool_trace_hook(agent),
             )
             push(

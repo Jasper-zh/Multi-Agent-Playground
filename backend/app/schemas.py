@@ -12,6 +12,11 @@ WorkflowType = Literal[
     "supervisor_dynamic",
     "single_agent_chat",
 ]
+BuiltinCapability = Literal[
+    "fs_list",
+    "fs_read",
+    "fs_write",
+]
 TraceEventType = Literal[
     "run_started",
     "node_entered",
@@ -72,6 +77,7 @@ class AgentDefinitionCreate(BaseModel):
     system_prompt: str = Field(min_length=1)
     model: str | None = None
     skill_ids: list[str] = Field(default_factory=list)
+    builtin_capabilities: list[BuiltinCapability] = Field(default_factory=list)
 
 
 class AgentDefinition(AgentDefinitionCreate):
@@ -84,6 +90,7 @@ class AgentDefinitionUpdate(BaseModel):
     system_prompt: str = Field(min_length=1)
     model: str | None = None
     skill_ids: list[str] = Field(default_factory=list)
+    builtin_capabilities: list[BuiltinCapability] = Field(default_factory=list)
 
 
 class WorkflowDefinitionCreate(BaseModel):
@@ -153,6 +160,7 @@ class RunArtifacts(BaseModel):
 class WorkflowRunRequest(BaseModel):
     workflow_id: str
     user_input: str = Field(min_length=1)
+    conversation_id: str | None = None
 
 
 class WorkflowRunResponse(BaseModel):
@@ -162,3 +170,35 @@ class WorkflowRunResponse(BaseModel):
     trace: list[TraceEvent]
     graph: WorkflowGraph
     artifacts: RunArtifacts
+    conversation_id: str | None = None
+
+
+class ConversationCreate(BaseModel):
+    workflow_id: str = Field(min_length=1)
+
+
+class Conversation(ConversationCreate):
+    id: str
+    title: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class Message(BaseModel):
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    agent_name: str | None = None
+    created_at: str
+
+
+class ConversationDetail(Conversation):
+    messages: list[Message] = Field(default_factory=list)
+
+
+class AppSettings(BaseModel):
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
+    env_path: str = ""

@@ -13,6 +13,10 @@ from .schemas import (
     AgentDefinition,
     AgentDefinitionCreate,
     AgentDefinitionUpdate,
+    AppSettings,
+    Conversation,
+    ConversationCreate,
+    ConversationDetail,
     SkillDefinition,
     SkillDefinitionCreate,
     SkillInstallResponse,
@@ -26,6 +30,7 @@ from .schemas import (
     WorkflowRunRequest,
     WorkflowRunResponse,
 )
+from .settings_bridge import reload_settings, settings, write_app_env_values
 from .skillhub_client import skillhub_client
 from .store import store
 from .workflows.planner_executor import build_planner_graph, run_planner_executor
@@ -40,6 +45,35 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/settings", response_model=AppSettings)
+def get_app_settings() -> AppSettings:
+    return AppSettings(
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_base_url=settings.OPENAI_BASE_URL,
+        openai_model=settings.OPENAI_MODEL,
+        env_path=settings.APP_ENV_PATH,
+    )
+
+
+@router.put("/settings", response_model=AppSettings)
+def update_app_settings(payload: AppSettings) -> AppSettings:
+    write_app_env_values(
+        {
+            "OPENAI_API_KEY": payload.openai_api_key,
+            "OPENAI_BASE_URL": payload.openai_base_url,
+            "OPENAI_MODEL": payload.openai_model,
+        }
+    )
+    reload_settings()
+    llm_gateway.refresh_client()
+    return AppSettings(
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_base_url=settings.OPENAI_BASE_URL,
+        openai_model=settings.OPENAI_MODEL,
+        env_path=settings.APP_ENV_PATH,
+    )
 
 
 @router.get("/workflow-templates")
@@ -265,16 +299,22 @@ def get_workflow_graph(workflow_id: str) -> WorkflowGraph:
 def _dispatch_run(
     workflow: WorkflowDefinition,
     user_input: str,
+    conversation_id: str | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
+    history = []
+    if conversation_id:
+        recent = store.get_recent_messages(conversation_id, limit=2)
+        history = [{"role": msg.role, "content": msg.content} for msg in recent]
+
     if workflow.type == "router_specialists":
-        return run_router_specialists(store, workflow, user_input, on_event=on_event)
+        return run_router_specialists(store, workflow, user_input, history=history, on_event=on_event)
     if workflow.type == "planner_executor":
-        return run_planner_executor(store, workflow, user_input, on_event=on_event)
+        return run_planner_executor(store, workflow, user_input, history=history, on_event=on_event)
     if workflow.type == "supervisor_dynamic":
-        return run_supervisor_dynamic(store, workflow, user_input, on_event=on_event)
+        return run_supervisor_dynamic(store, workflow, user_input, history=history, on_event=on_event)
     if workflow.type == "single_agent_chat":
-        return run_single_agent_chat(store, workflow, user_input, on_event=on_event)
+        return run_single_agent_chat(store, workflow, user_input, history=history, on_event=on_event)
     raise HTTPException(status_code=400, detail=f"Unsupported workflow type: {workflow.type}")
 
 
@@ -283,7 +323,34 @@ def run_workflow(payload: WorkflowRunRequest) -> WorkflowRunResponse:
     workflow = store.get_workflow(payload.workflow_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
-    return _dispatch_run(workflow, payload.user_input)
+
+    conversation_id = payload.conversation_id
+    if not conversation_id:
+        conversation = store.create_conversation(
+            ConversationCreate(workflow_id=payload.workflow_id)
+        )
+        conversation_id = conversation.id
+
+    result = _dispatch_run(workflow, payload.user_input, conversation_id=conversation_id)
+
+    store.create_message(
+        conversation_id=conversation_id,
+        role="user",
+        content=payload.user_input,
+    )
+    store.create_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content=result.assistant_message,
+        agent_name=result.artifacts.route_agent_name,
+    )
+
+    if store.get_conversation(conversation_id).title is None:
+        title = payload.user_input[:50] + ("..." if len(payload.user_input) > 50 else "")
+        store.update_conversation_title(conversation_id, title)
+
+    result.conversation_id = conversation_id
+    return result
 
 
 @router.post("/runs/stream")
@@ -292,6 +359,13 @@ def run_workflow_stream(payload: WorkflowRunRequest) -> StreamingResponse:
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
 
+    conversation_id = payload.conversation_id
+    if not conversation_id:
+        conversation = store.create_conversation(
+            ConversationCreate(workflow_id=payload.workflow_id)
+        )
+        conversation_id = conversation.id
+
     stream_queue: queue.Queue[tuple[str, dict | None]] = queue.Queue()
 
     def on_trace(event: TraceEvent) -> None:
@@ -299,7 +373,25 @@ def run_workflow_stream(payload: WorkflowRunRequest) -> StreamingResponse:
 
     def worker() -> None:
         try:
-            result = _dispatch_run(workflow, payload.user_input, on_event=on_trace)
+            result = _dispatch_run(workflow, payload.user_input, conversation_id=conversation_id, on_event=on_trace)
+
+            store.create_message(
+                conversation_id=conversation_id,
+                role="user",
+                content=payload.user_input,
+            )
+            store.create_message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=result.assistant_message,
+                agent_name=result.artifacts.route_agent_name,
+            )
+
+            if store.get_conversation(conversation_id).title is None:
+                title = payload.user_input[:50] + ("..." if len(payload.user_input) > 50 else "")
+                store.update_conversation_title(conversation_id, title)
+
+            result.conversation_id = conversation_id
             stream_queue.put(("final", result.model_dump()))
         except Exception as error:  # noqa: BLE001
             stream_queue.put(("error", {"message": str(error)}))
@@ -325,3 +417,34 @@ def run_workflow_stream(payload: WorkflowRunRequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============ Conversation API ============
+
+@router.get("/conversations", response_model=list[Conversation])
+def list_conversations(workflow_id: str | None = None) -> list[Conversation]:
+    return store.list_conversations(workflow_id=workflow_id)
+
+
+@router.post("/conversations", response_model=Conversation)
+def create_conversation(payload: ConversationCreate) -> Conversation:
+    workflow = store.get_workflow(payload.workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return store.create_conversation(payload)
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
+def get_conversation(conversation_id: str) -> ConversationDetail:
+    conversation = store.get_conversation_with_messages(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return conversation
+
+
+@router.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str) -> dict[str, bool]:
+    deleted = store.delete_conversation(conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"deleted": True}

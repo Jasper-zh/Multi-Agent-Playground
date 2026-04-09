@@ -6,18 +6,23 @@ import {
   GitBranch,
   LayoutDashboard,
   Play,
+  Settings2,
   Users,
 } from "lucide-vue-next";
 
 import {
   createAgent,
+  createConversation,
   createWorkflow,
+  fetchAppSettings,
   fetchAgents,
+  fetchConversation,
   fetchSkills,
   fetchTemplates,
   fetchWorkflowGraph,
   fetchWorkflows,
   updateAgent,
+  updateAppSettings,
   updateWorkflow,
   runWorkflowStream,
   runWorkflow,
@@ -26,6 +31,7 @@ import AgentsPage from "./pages/AgentsPage.vue";
 import { I18N_KEY, createUiI18n } from "./i18n";
 import OverviewPage from "./pages/OverviewPage.vue";
 import PlaygroundPage from "./pages/PlaygroundPage.vue";
+import SettingsPage from "./pages/SettingsPage.vue";
 import WorkflowsPage from "./pages/WorkflowsPage.vue";
 
 const templates = ref([]);
@@ -39,12 +45,15 @@ const loading = ref(false);
 const errorMessage = ref("");
 const currentPage = ref("overview");
 const chatMessages = ref([]);
+const currentConversationId = ref("");
 const displayedTrace = ref([]);
 const replayNodeId = ref("");
 const replayingTrace = ref(false);
 const replayToken = ref(0);
 const activeRunController = ref(null);
 const skillSyncStatus = ref("");
+const appSettings = ref(null);
+const savingSettings = ref(false);
 
 const i18n = createUiI18n();
 provide(I18N_KEY, i18n);
@@ -55,6 +64,7 @@ const navItems = computed(() => [
   { id: "agents", label: t("nav.agents"), icon: Users },
   { id: "workflows", label: t("nav.workflows"), icon: GitBranch },
   { id: "playground", label: t("nav.playground"), icon: Play },
+  { id: "settings", label: t("nav.settings"), icon: Settings2 },
 ]);
 
 const activeNodeId = computed(() => {
@@ -73,11 +83,12 @@ const selectedWorkflow = computed(() =>
 );
 
 async function loadInitialData() {
-  [templates.value, skills.value, agents.value, workflows.value] = await Promise.all([
+  [templates.value, skills.value, agents.value, workflows.value, appSettings.value] = await Promise.all([
     fetchTemplates(),
     fetchSkills(),
     fetchAgents(),
     fetchWorkflows(),
+    fetchAppSettings(),
   ]);
 
   if (!selectedWorkflowId.value && workflows.value.length) {
@@ -213,6 +224,19 @@ async function handleUpdateWorkflow(payload) {
   }
 }
 
+async function handleSaveSettings(payload) {
+  errorMessage.value = "";
+  if (savingSettings.value) return;
+  savingSettings.value = true;
+  try {
+    appSettings.value = await updateAppSettings(payload);
+  } catch (error) {
+    errorMessage.value = String(error.message || error);
+  } finally {
+    savingSettings.value = false;
+  }
+}
+
 async function handleRun(payload) {
   errorMessage.value = "";
   loading.value = true;
@@ -235,13 +259,18 @@ async function handleRun(payload) {
   };
   chatMessages.value = [...chatMessages.value, userMessage];
 
+  const runPayload = {
+    ...payload,
+    conversation_id: currentConversationId.value || undefined,
+  };
+
   try {
     let streamResult = null;
     let streamError = "";
     let streamTransportFailed = false;
 
     try {
-      await runWorkflowStream(payload, {
+      await runWorkflowStream(runPayload, {
         signal: controller.signal,
         onTrace: (event) => {
           if (token !== replayToken.value) return;
@@ -274,10 +303,13 @@ async function handleRun(payload) {
         errorMessage.value = streamError;
         return;
       }
-      const runResult = await runWorkflow(payload);
+      const runResult = await runWorkflow(runPayload);
       if (token !== replayToken.value) return;
       lastRun.value = runResult;
       selectedGraph.value = runResult.graph;
+      if (runResult.conversation_id) {
+        currentConversationId.value = runResult.conversation_id;
+      }
       const finished = await replayTrace(runResult.trace || []);
       if (finished && token === replayToken.value) {
         const assistantMessage = {
@@ -298,6 +330,9 @@ async function handleRun(payload) {
     lastRun.value = streamResult;
     selectedGraph.value = streamResult.graph;
     displayedTrace.value = streamResult.trace || displayedTrace.value;
+    if (streamResult.conversation_id) {
+      currentConversationId.value = streamResult.conversation_id;
+    }
     const assistantMessage = {
       id: `assistant_${Date.now()}`,
       role: "assistant",
@@ -327,6 +362,7 @@ function handleClearRun() {
   }
   lastRun.value = null;
   chatMessages.value = [];
+  currentConversationId.value = "";
   displayedTrace.value = [];
   replayNodeId.value = "";
   replayingTrace.value = false;
@@ -339,6 +375,7 @@ watch(selectedWorkflowId, async (workflowId) => {
     activeRunController.value = null;
   }
   chatMessages.value = [];
+  currentConversationId.value = "";
   lastRun.value = null;
   displayedTrace.value = [];
   replayNodeId.value = "";
@@ -447,7 +484,7 @@ onMounted(async () => {
           />
 
           <PlaygroundPage
-            v-else
+            v-else-if="currentPage === 'playground'"
             :workflows="workflows"
             :agents="agents"
             :selected-workflow-id="selectedWorkflowId"
@@ -461,6 +498,13 @@ onMounted(async () => {
             @run="handleRun"
             @clear="handleClearRun"
             @select-workflow="selectedWorkflowId = $event"
+          />
+
+          <SettingsPage
+            v-else
+            :settings="appSettings"
+            :saving="savingSettings"
+            @save="handleSaveSettings"
           />
         </div>
       </Transition>

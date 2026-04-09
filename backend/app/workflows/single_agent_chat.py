@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
@@ -94,6 +94,7 @@ def run_single_agent_chat(
     store: InMemoryPlaygroundStore,
     workflow: WorkflowDefinition,
     user_input: str,
+    history: list[dict[str, str]] | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
     agent: AgentDefinition | None = None
@@ -111,6 +112,119 @@ def run_single_agent_chat(
             on_event(item)
 
     trace: list[TraceEvent] = []
+    def make_tool_trace_hook(agent: AgentDefinition):
+        def on_tool_trace(meta: dict[str, Any]) -> None:
+            stage = str(meta.get("stage") or "")
+            tool_name = str(meta.get("tool_name") or "tool")
+
+            if stage == "tool_candidates":
+                available = int(meta.get("available_count") or 0)
+                selected = int(meta.get("selected_count") or 0)
+                push(
+                    trace,
+                    event(
+                        "state_updated",
+                        "Tool Matching",
+                        f"Matched {selected}/{available} tool(s) for this request.",
+                        node_id=AGENT_NODE,
+                        agent_id=agent.id,
+                        matching=meta.get("matching", []),
+                    ),
+                )
+                return
+
+            if stage == "tool_started":
+                push(
+                    trace,
+                    event(
+                        "state_updated",
+                        "Tool Started",
+                        f"{agent.name} is running {tool_name}.",
+                        node_id=AGENT_NODE,
+                        agent_id=agent.id,
+                        tool_name=tool_name,
+                        tool_call_id=meta.get("tool_call_id"),
+                        input_keys=meta.get("input_keys", []),
+                        skill_id=meta.get("skill_id"),
+                        skill_name=meta.get("skill_name"),
+                    ),
+                )
+                return
+
+            if stage == "tool_retry":
+                attempt = int(meta.get("attempt") or 1)
+                max_attempts = int(meta.get("max_attempts") or attempt)
+                reason = str(meta.get("reason") or "Transient failure, retrying.")
+                push(
+                    trace,
+                    event(
+                        "state_updated",
+                        "Tool Retry",
+                        f"{tool_name} attempt {attempt}/{max_attempts} failed: {reason[:120]}",
+                        node_id=AGENT_NODE,
+                        agent_id=agent.id,
+                        tool_name=tool_name,
+                        tool_call_id=meta.get("tool_call_id"),
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        delay_ms=meta.get("delay_ms"),
+                        skill_id=meta.get("skill_id"),
+                        skill_name=meta.get("skill_name"),
+                    ),
+                )
+                return
+
+            if stage == "tool_blocked":
+                reason = str(meta.get("reason") or "Tool execution blocked.")
+                push(
+                    trace,
+                    event(
+                        "state_updated",
+                        "Tool Blocked",
+                        reason[:220],
+                        node_id=AGENT_NODE,
+                        agent_id=agent.id,
+                        tool_name=tool_name,
+                        tool_call_id=meta.get("tool_call_id"),
+                        skill_id=meta.get("skill_id"),
+                        skill_name=meta.get("skill_name"),
+                        missing_env_vars=meta.get("missing_env_vars", []),
+                        missing_shell_dependencies=meta.get("missing_shell_dependencies", []),
+                        missing_launchers=meta.get("missing_launchers", []),
+                    ),
+                )
+                return
+
+            if stage != "tool_finished":
+                return
+
+            ok = bool(meta.get("ok"))
+            generated_files = meta.get("generated_files")
+            files = generated_files if isinstance(generated_files, list) else []
+            detail = f"{agent.name} finished {tool_name} ({'success' if ok else 'failed'})."
+            if ok and files:
+                detail += f" Generated {len(files)} file(s)."
+            if (not ok) and meta.get("error"):
+                detail += f" Error: {str(meta.get('error'))[:140]}"
+            push(
+                trace,
+                event(
+                    "state_updated",
+                    "Tool Finished" if ok else "Tool Failed",
+                    detail,
+                    node_id=AGENT_NODE,
+                    agent_id=agent.id,
+                    tool_name=tool_name,
+                    tool_call_id=meta.get("tool_call_id"),
+                    ok=ok,
+                    duration_ms=meta.get("duration_ms"),
+                    output_dir=meta.get("output_dir"),
+                    generated_files=files,
+                ),
+            )
+
+        return on_tool_trace
+
     push(
         trace,
         event(
@@ -133,7 +247,12 @@ def run_single_agent_chat(
                 agent_id=agent.id,
             ),
         )
-        specialist_answer = llm_gateway.run_agent(agent, state["user_input"])
+        specialist_answer = llm_gateway.run_agent(
+            agent,
+            state["user_input"],
+            history=history,
+            trace_hook=make_tool_trace_hook(agent),
+        )
         push(
             trace,
             event(

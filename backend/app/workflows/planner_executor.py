@@ -184,6 +184,7 @@ def run_planner_executor(
     store: InMemoryPlaygroundStore,
     workflow: WorkflowDefinition,
     user_input: str,
+    history: list[dict[str, str]] | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
     workers: list[AgentDefinition] = []
@@ -548,6 +549,7 @@ def run_planner_executor(
             task_answer = llm_gateway.run_agent(
                 worker,
                 worker_input,
+                history=history,
                 trace_hook=make_tool_trace_hook(worker),
             )
             task_reports = list(state.get("task_reports", []))

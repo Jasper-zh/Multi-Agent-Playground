@@ -1,0 +1,54 @@
+{
+  "name": "agent-playground-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "prepare:artifacts": "node scripts/prepare-artifacts.mjs",
+    "dist:mac": "node scripts/prepare-artifacts.mjs && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
+    "dist:mac:signed": "node scripts/prepare-artifacts.mjs && electron-builder --mac dmg zip",
+    "dist:win": "node scripts/prepare-artifacts.mjs && electron-builder --win nsis zip"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.zhanghao.agentplayground",
+    "productName": "Agent Playground",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": ".artifacts/renderer",
+        "to": "renderer"
+      },
+      {
+        "from": ".artifacts/backend",
+        "to": "backend"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

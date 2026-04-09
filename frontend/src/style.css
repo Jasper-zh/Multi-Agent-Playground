@@ -427,19 +427,22 @@ pre,
 }
 
 .agent-role-pill {
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 4px 12px;
-  border-radius: 999px;
-  background: #e2e8f0;
-  color: #475569;
+  min-height: 32px;
+  padding: 6px 16px;
+  border-radius: 14px;
+  background: #f8fbff;
+  border: 1px solid #edf2f8;
+  color: #3f4f66;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
   font-weight: 700;
+  justify-content: flex-start;
 }
 
 .overview-grid {
@@ -789,51 +792,56 @@ pre,
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 24px 24px 22px;
-  min-height: 340px;
+  padding: 32px;
+  min-height: 420px;
   border-radius: 28px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid #dbe6f3;
   background: #fff;
   backdrop-filter: none;
-  box-shadow: 0 24px 44px rgba(15, 23, 42, 0.08);
-  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 16px 38px rgba(111, 145, 194, 0.12);
+  transition: border-color 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;
 }
 
 .manager-agent-card:hover {
-  border-color: #d1d5db;
-  transform: translateY(-1px);
-  box-shadow: 0 28px 56px rgba(15, 23, 42, 0.1);
+  border-color: #c9d8eb;
+  transform: translateY(-2px);
+  box-shadow: 0 28px 56px rgba(153, 182, 227, 0.24);
 }
 
 .manager-agent-card h4 {
   margin: 0;
-  font-size: 18px;
-  line-height: 1.2;
-  font-weight: 700;
+  font-size: 24px;
+  line-height: 1.12;
+  font-weight: 900;
   color: #0f172a;
-  letter-spacing: 0;
+  letter-spacing: -0.025em;
 }
 
 .manager-agent-card .workflow-id {
-  margin: 4px 0 0;
-  color: #9ca3af;
+  margin: 6px 0 0;
+  color: #9aa9bf;
+  font-size: 10px;
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
 }
 
 .agent-summary {
   margin: 0;
   color: #64748b;
   font-size: 14px;
-  line-height: 1.48;
+  line-height: 1.65;
   letter-spacing: 0;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
 .agent-prompt-preview {
-  min-height: 82px;
-  max-height: 82px;
+  min-height: 74px;
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .agent-action-row {
@@ -843,62 +851,79 @@ pre,
 }
 
 .agent-action-row .icon-button {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  background: #f8fafc;
-  color: #94a3b8;
-  border: 1px solid #f1f5f9;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: #f8fbff;
+  color: #98a9c3;
+  border: 1px solid #edf3fb;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 
 .agent-action-row .icon-button:hover {
   background: #0f172a;
   color: #fff;
+  transform: translateY(-1px);
 }
 
 .agent-action-row .icon-button-store:hover {
-  color: #2563eb;
-  background: #eff6ff;
+  color: #4b7bec;
+  background: #eef5ff;
 }
 
 .agent-action-row .icon-button-chat:hover {
-  color: #0f766e;
-  background: #ecfeff;
+  color: #4f82a8;
+  background: #f1f7fb;
 }
 
 .agent-installed-skills {
-  margin-top: 24px;
-  padding-top: 14px;
+  margin-top: 0;
+  padding-top: 20px;
   border-top: 1px solid #f1f5f9;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
 }
 
 .agent-installed-skills-title {
-  margin: 0 0 8px;
-  color: #94a3b8;
+  margin: 0 0 12px;
+  color: #9eacc2;
   font-size: 10px;
   line-height: 1;
   font-weight: 900;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .agent-installed-skill-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+  max-height: 64px;
+  overflow: hidden;
+  align-content: flex-start;
 }
 
 .agent-installed-skill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border-radius: 10px;
-  border: 1px solid #eef2f7;
-  background: #f3f4f6;
-  color: #64748b;
-  font-size: 12px;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 18px;
+  border: 1px solid #e8eef7;
+  background: #f8fbff;
+  color: #4b5d77;
+  font-size: 11px;
   font-weight: 700;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.agent-installed-skill:hover {
+  border-color: #d9e6f7;
+  background: #f2f7fd;
 }
 
 .agent-installed-skill-icon {
@@ -907,11 +932,75 @@ pre,
   color: #94a3b8;
 }
 
+.agent-card-shell {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  height: 100%;
+}
+
+.agent-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.agent-avatar-hero {
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  box-shadow: 0 18px 30px rgba(148, 163, 184, 0.28);
+  transition: transform 0.45s ease;
+}
+
+.manager-agent-card:hover .agent-avatar-hero {
+  transform: scale(1.08);
+}
+
+.agent-card-title-block {
+  margin-bottom: 12px;
+}
+
+.agent-card-role-wrap {
+  margin-bottom: 16px;
+}
+
 .agent-role-prompt-block {
   display: grid;
   gap: 10px;
   margin-top: 12px;
   min-height: 96px;
+}
+
+.agent-card-sections {
+  display: grid;
+  gap: 0;
+  margin-top: auto;
+  padding-top: 24px;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.agent-empty-meta {
+  padding: 6px 2px 0;
+  color: #c6d2e2;
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 500;
+  min-height: 32px;
+}
+
+.capability-pill:hover {
+  border-color: #dceee7;
+  background: #f2fbf7;
+}
+
+.agent-section-title-skills svg {
+  color: #4b7bec;
+}
+
+.agent-section-title-capabilities svg {
+  color: #1dbf73;
 }
 
 .agent-modal-overlay,
@@ -1019,6 +1108,55 @@ pre,
 .agent-modal-installed-list {
   display: grid;
   gap: 8px;
+}
+
+.agent-modal-capability-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.agent-modal-capability-item {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.agent-modal-capability-item:hover {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+}
+
+.agent-modal-capability-item.active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.agent-modal-capability-main {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: #475569;
+}
+
+.agent-modal-capability-main strong {
+  display: block;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.agent-modal-capability-main p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .agent-modal-installed-item {
@@ -2501,7 +2639,84 @@ textarea:focus,
     width: 100%;
   }
 
-  .skill-store-sync-note {
-    padding: 10px 20px;
-  }
+.skill-store-sync-note {
+  padding: 10px 20px;
+}
+}
+
+.settings-page {
+  gap: 24px;
+}
+
+.settings-card {
+  display: grid;
+  gap: 24px;
+}
+
+.settings-form-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-field span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-field input {
+  width: 100%;
+  background: #f8fafc;
+  border: 1px solid #dbe3ef;
+  border-radius: 14px;
+  padding: 13px 15px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 500;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.settings-field input:focus {
+  outline: none;
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 4px rgba(147, 197, 253, 0.18);
+}
+
+.settings-footnote {
+  display: grid;
+  gap: 6px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.settings-footnote strong {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-footnote span {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-start;
 }

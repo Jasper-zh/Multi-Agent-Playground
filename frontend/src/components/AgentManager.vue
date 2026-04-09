@@ -5,11 +5,14 @@ import {
   Code,
   Database,
   FileText,
+  FolderOpen,
+  FolderSearch,
   Globe,
   Image as ImageIcon,
   Library,
   Mail,
   MessageCircle,
+  PencilLine,
   Plus,
   Settings2,
   ShoppingBag,
@@ -62,6 +65,7 @@ const themeTokens = [
   "agent-theme-rose",
   "agent-theme-indigo",
 ];
+const maxVisibleMetaItems = 4;
 
 const skillLibrary = computed(() =>
   props.skills.map((skill) => ({
@@ -89,10 +93,14 @@ const decoratedAgents = computed(() =>
         };
       })
       .filter((item) => item.name);
+    const builtinCapabilities = builtinCapabilityOptions.filter((option) =>
+      (agent.builtin_capabilities || []).includes(option.id),
+    );
     return {
       ...agent,
       roleLabel,
-      boundSkills,
+      boundSkills: boundSkills.slice(0, maxVisibleMetaItems),
+      builtinCapabilities: builtinCapabilities.slice(0, maxVisibleMetaItems),
       theme: themeTokens[index % themeTokens.length],
     };
   }),
@@ -101,6 +109,27 @@ const decoratedAgents = computed(() =>
 const storeAgent = computed(
   () => props.agents.find((agent) => agent.id === storeAgentId.value) || null,
 );
+
+const builtinCapabilityOptions = [
+  {
+    id: "fs_list",
+    label: "List Directories",
+    description: "Allow listing local files and folders.",
+    icon: FolderSearch,
+  },
+  {
+    id: "fs_read",
+    label: "Read Files",
+    description: "Allow reading local text files.",
+    icon: FileText,
+  },
+  {
+    id: "fs_write",
+    label: "Write Files",
+    description: "Allow creating or overwriting local text files.",
+    icon: PencilLine,
+  },
+];
 
 function resolveRoleLabel(name, description) {
   const normalized = String(name || "").trim().toLowerCase();
@@ -111,12 +140,20 @@ function resolveRoleLabel(name, description) {
   };
   if (nameMap[normalized]) return nameMap[normalized];
 
+  const shorten = (text) => {
+    const rawText = String(text || "").trim();
+    if (!rawText) return "";
+    const maxLength = 18;
+    if (rawText.length <= maxLength) return rawText;
+    return `${rawText.slice(0, maxLength - 3).trim()}...`;
+  };
+
   const raw = String(description || "").trim();
   if (!raw) return "Specialist";
-  if (raw.length <= 30) return raw;
+  if (raw.length <= 18) return raw;
   const head = raw.split(/[,.，。；;]/)[0].trim();
-  if (head && head.length <= 30) return head;
-  return `${raw.slice(0, 27).trim()}...`;
+  if (head) return shorten(head);
+  return shorten(raw);
 }
 
 function previewPrompt(text) {
@@ -215,6 +252,7 @@ function beginEdit(agent) {
     details: agent.system_prompt || "",
     model: agent.model ?? null,
     skill_ids: [...(agent.skill_ids || [])],
+    builtin_capabilities: [...(agent.builtin_capabilities || [])],
   };
 }
 
@@ -225,6 +263,17 @@ function closeEdit() {
 function removeEditingSkill(skillId) {
   if (!editingAgent.value) return;
   editingAgent.value.skill_ids = editingAgent.value.skill_ids.filter((id) => id !== skillId);
+}
+
+function toggleBuiltinCapability(capabilityId) {
+  if (!editingAgent.value) return;
+  const current = new Set(editingAgent.value.builtin_capabilities || []);
+  if (current.has(capabilityId)) {
+    current.delete(capabilityId);
+  } else {
+    current.add(capabilityId);
+  }
+  editingAgent.value.builtin_capabilities = [...current];
 }
 
 function openSkillStore(agentId) {
@@ -248,6 +297,7 @@ async function submitCreate() {
     description: addForm.role,
     system_prompt: addForm.details,
     skill_ids: [],
+    builtin_capabilities: [],
   });
   resetCreateForm();
 }
@@ -266,6 +316,7 @@ async function submitEdit() {
         system_prompt: editingAgent.value.details,
         model: editingAgent.value.model,
         skill_ids: [...editingAgent.value.skill_ids],
+        builtin_capabilities: [...editingAgent.value.builtin_capabilities],
       },
     });
     closeEdit();
@@ -295,6 +346,7 @@ async function toggleStoreSkill(skillId) {
         system_prompt: storeAgent.value.system_prompt,
         model: storeAgent.value.model ?? null,
         skill_ids: nextSkills,
+        builtin_capabilities: [...(storeAgent.value.builtin_capabilities || [])],
       },
     });
     if (editingAgent.value?.id === storeAgent.value.id) {
@@ -365,58 +417,91 @@ function getSkillDisplay(skillId) {
         :key="agent.id"
         class="glass-panel agent-card manager-agent-card"
       >
-        <div class="agent-card-top">
-          <div class="agent-avatar" :class="agent.theme">
-            <Bot :size="18" />
+        <div class="agent-card-shell">
+          <div class="agent-card-top">
+            <div class="agent-avatar agent-avatar-hero" :class="agent.theme">
+              <Bot :size="26" />
+            </div>
+            <div class="agent-action-row">
+              <button
+                class="icon-button icon-button-store"
+                type="button"
+                title="Install Skills"
+                @click.stop="openSkillStore(agent.id)"
+              >
+                <ShoppingBag :size="18" />
+              </button>
+              <button
+                class="icon-button icon-button-chat"
+                type="button"
+                title="Chat with Agent"
+                @click.stop="startQuickChat(agent)"
+              >
+                <MessageCircle :size="18" />
+              </button>
+              <button
+                class="icon-button"
+                type="button"
+                title="Edit Agent"
+                @click.stop="beginEdit(agent)"
+              >
+                <Settings2 :size="18" />
+              </button>
+            </div>
           </div>
-          <div class="agent-action-row">
-            <button
-              class="icon-button icon-button-store"
-              type="button"
-              title="Install Skills"
-              @click.stop="openSkillStore(agent.id)"
-            >
-              <ShoppingBag :size="18" />
-            </button>
-            <button
-              class="icon-button icon-button-chat"
-              type="button"
-              title="Chat with Agent"
-              @click.stop="startQuickChat(agent)"
-            >
-              <MessageCircle :size="18" />
-            </button>
-            <button
-              class="icon-button"
-              type="button"
-              title="Edit Agent"
-              @click.stop="beginEdit(agent)"
-            >
-              <Settings2 :size="18" />
-            </button>
-          </div>
-        </div>
-        <h4>{{ agent.name }}</h4>
-        <p class="workflow-id">agent_{{ agent.id }}</p>
-        <div class="agent-role-prompt-block">
-          <span class="chip role-chip agent-role-pill" :title="agent.description">{{ agent.roleLabel }}</span>
-          <p class="agent-summary agent-prompt-preview" :title="agent.system_prompt || ''">
-            {{ previewPrompt(agent.system_prompt) || "-" }}
-          </p>
-        </div>
 
-        <div v-if="agent.boundSkills.length" class="agent-installed-skills">
-          <p class="agent-installed-skills-title">Installed Skills</p>
-          <div class="agent-installed-skill-list">
-            <div
-              v-for="skill in agent.boundSkills"
-              :key="`${agent.id}_${skill.id}`"
-              class="agent-installed-skill"
-            >
-              <span class="agent-installed-skill-icon">
-                <component :is="skill.icon" :size="12" />
-              </span>
-              <span>{{ skill.name }}</span>
+          <div class="agent-card-title-block">
+            <h4>{{ agent.name }}</h4>
+            <p class="workflow-id">agent_{{ agent.id }}</p>
+          </div>
+
+          <div class="agent-card-role-wrap">
+            <span class="chip role-chip agent-role-pill" :title="agent.description">{{ agent.roleLabel }}</span>
+          </div>
+
+          <p class="agent-summary agent-prompt-preview" :title="agent.description || ''">
+            {{ previewPrompt(agent.description) || "-" }}
+          </p>
+
+          <div class="agent-card-sections">
+            <div class="agent-installed-skills">
+              <p class="agent-installed-skills-title agent-section-title-skills">
+                <Zap :size="10" />
+                <span>Installed Skills</span>
+              </p>
+              <div v-if="agent.boundSkills.length" class="agent-installed-skill-list">
+                <div
+                  v-for="skill in agent.boundSkills"
+                  :key="`${agent.id}_${skill.id}`"
+                  class="agent-installed-skill"
+                >
+                  <span class="agent-installed-skill-icon">
+                    <component :is="skill.icon" :size="12" />
+                  </span>
+                  <span>{{ skill.name }}</span>
+                </div>
+              </div>
+              <div v-else class="agent-empty-meta">No skills installed</div>
+            </div>
+
+            <div class="agent-installed-skills">
+              <p class="agent-installed-skills-title agent-section-title-capabilities">
+                <FolderOpen :size="10" />
+                <span>Built-in Capabilities</span>
+              </p>
+              <div v-if="agent.builtinCapabilities.length" class="agent-installed-skill-list">
+                <div
+                  v-for="capability in agent.builtinCapabilities"
+                  :key="`${agent.id}_${capability.id}`"
+                  class="agent-installed-skill capability-pill"
+                >
+                  <span class="agent-installed-skill-icon">
+                    <component :is="capability.icon || FolderOpen" :size="12" />
+                  </span>
+                  <span>{{ capability.label }}</span>
+                </div>
+              </div>
+              <div v-else class="agent-empty-meta">No capabilities enabled</div>
             </div>
           </div>
         </div>
@@ -463,6 +548,27 @@ function getSkillDisplay(skillId) {
                   <Trash2 :size="14" />
                 </button>
               </div>
+            </div>
+          </div>
+          <div class="agent-modal-field">
+            <label>Built-in Capabilities</label>
+            <div class="agent-modal-capability-list">
+              <button
+                v-for="capability in builtinCapabilityOptions"
+                :key="capability.id"
+                type="button"
+                class="agent-modal-capability-item"
+                :class="{ active: editingAgent.builtin_capabilities.includes(capability.id) }"
+                @click="toggleBuiltinCapability(capability.id)"
+              >
+                <div class="agent-modal-capability-main">
+                  <component :is="capability.icon" :size="16" />
+                  <div>
+                    <strong>{{ capability.label }}</strong>
+                    <p>{{ capability.description }}</p>
+                  </div>
+                </div>
+              </button>
             </div>
           </div>
         </div>

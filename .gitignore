@@ -10,3 +10,10 @@ backend/generated/
 frontend/dist/
 frontend/node_modules/
 agentic-workflow-playground-ui/node_modules/
+desktop/node_modules/
+desktop/.artifacts/
+desktop/release/
+desktop/dist/
+backend/build/
+backend/dist/
+backend/*.spec
