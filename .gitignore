@@ -1,6 +1,8 @@
 backend/.venv/
 .venv/
 .env
+openclaw-main/
+agentic-workflow-playground-ui/
 backend/.runtime/
 backend/data/*.db
 backend/uvicorn*.log
