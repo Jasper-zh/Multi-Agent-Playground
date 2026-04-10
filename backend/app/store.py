@@ -177,6 +177,15 @@ class SQLitePlaygroundStore:
                 ON messages(conversation_id)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def _rename_default_workflow_names(self) -> None:
         rename_pairs = [
@@ -194,6 +203,36 @@ class SQLitePlaygroundStore:
                     """,
                     (new_name, old_name),
                 )
+
+    def get_app_settings_payload(self) -> dict[str, object]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT value
+                FROM app_settings
+                WHERE key = 'main'
+                """
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            payload = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError, KeyError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def save_app_settings_payload(self, payload: dict[str, object]) -> None:
+        serialized = json.dumps(payload, ensure_ascii=False)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ('main', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (serialized, now),
+            )
 
     def _row_to_agent(self, row: sqlite3.Row) -> AgentDefinition:
         try:
@@ -929,6 +968,25 @@ class SQLitePlaygroundStore:
             )
         return self.get_agent(agent_id)
 
+    def agent_usage_workflows(self, agent_id: str) -> list[WorkflowDefinition]:
+        workflows = self.list_workflows()
+        return [
+            workflow
+            for workflow in workflows
+            if agent_id in (workflow.specialist_agent_ids or [])
+        ]
+
+    def delete_agent(self, agent_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM agents
+                WHERE id = ?
+                """,
+                (agent_id,),
+            )
+            return cursor.rowcount > 0
+
     def list_skills(self) -> list[SkillDefinition]:
         file_skills = self._load_file_skills()
         return sorted(file_skills.values(), key=lambda item: (item.name.lower(), item.id))
@@ -1210,6 +1268,42 @@ class SQLitePlaygroundStore:
             )
         return self.get_workflow(workflow_id)
 
+    def delete_workflow(self, workflow_id: str) -> bool:
+        with self._connect() as connection:
+            conversation_rows = connection.execute(
+                """
+                SELECT id
+                FROM conversations
+                WHERE workflow_id = ?
+                """,
+                (workflow_id,),
+            ).fetchall()
+            conversation_ids = [str(row["id"]) for row in conversation_rows if str(row["id"] or "").strip()]
+            for conversation_id in conversation_ids:
+                connection.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE conversation_id = ?
+                    """,
+                    (conversation_id,),
+                )
+            if conversation_ids:
+                connection.execute(
+                    f"""
+                    DELETE FROM conversations
+                    WHERE id IN ({",".join("?" for _ in conversation_ids)})
+                    """,
+                    conversation_ids,
+                )
+            cursor = connection.execute(
+                """
+                DELETE FROM workflows
+                WHERE id = ?
+                """,
+                (workflow_id,),
+            )
+            return cursor.rowcount > 0
+
     def get_templates(self) -> list[WorkflowTemplate]:
         return [
             WorkflowTemplate(
@@ -1451,52 +1545,52 @@ class SQLitePlaygroundStore:
 
         default_agent_specs = [
             {
-                "name": "解决方案架构师",
-                "description": "负责需求澄清、架构方案设计与落地计划制定。",
+                "name": "产品经理",
+                "description": "负责需求澄清、优先级判断、范围控制与验收标准定义。",
                 "system_prompt": (
-                    "你是软件交付团队中的“解决方案架构师”。\n"
+                    "你是软件产品团队中的“产品经理”。\n"
                     "职责：\n"
-                    "1) 澄清目标、约束与验收标准；\n"
-                    "2) 提供可选架构方案并说明复杂度、成本与风险权衡；\n"
-                    "3) 输出可执行的实施里程碑与依赖关系。\n"
+                    "1) 澄清用户目标、约束、业务背景与优先级；\n"
+                    "2) 将模糊需求整理成明确的问题陈述、范围边界与验收标准；\n"
+                    "3) 产出面向设计与研发的任务拆解与交付建议。\n"
                     "输出规则：\n"
                     "- 结构化表达，明确假设；\n"
-                    "- 标注未知项与下一步决策点；\n"
-                    "- 非必要不下沉到实现细节代码。"
+                    "- 优先关注目标、用户价值、约束和优先级；\n"
+                    "- 非必要不直接下沉到实现代码。"
                 ),
                 "skill_names": ["Structured Reasoning"],
             },
             {
-                "name": "实施工程师",
-                "description": "将方案转化为可执行实现，给出具体代码与落地步骤。",
+                "name": "设计师",
+                "description": "负责信息架构、交互流程、页面结构与视觉方向建议。",
                 "system_prompt": (
-                    "你是“实施工程师”。\n"
+                    "你是产品团队中的“设计师”。\n"
                     "职责：\n"
-                    "1) 将已确认方案转化为可执行的实现任务；\n"
-                    "2) 提供代码级建议、命令与文件级改动说明；\n"
-                    "3) 保持方案务实、最小改动且可上线。\n"
+                    "1) 将需求转成清晰的信息架构、页面结构与用户流程；\n"
+                    "2) 提供交互方案、界面层级、状态设计与视觉方向建议；\n"
+                    "3) 输出便于工程实现的设计说明。\n"
                     "输出规则：\n"
-                    "- 优先给可运行片段与明确路径；\n"
-                    "- 说明前置条件与回滚策略；\n"
-                    "- 覆盖边界场景与失败处理。"
+                    "- 优先说明页面结构、用户路径与交互状态；\n"
+                    "- 兼顾可用性、一致性与实现可行性；\n"
+                    "- 不空谈风格，尽量给具体界面建议。"
                 ),
                 "skill_names": ["Structured Reasoning", "Teaching Mode"],
             },
             {
-                "name": "质量与风险审查员",
-                "description": "负责发现质量风险、回归问题与验证缺口。",
+                "name": "工程师",
+                "description": "负责技术方案、代码实现路径、风险提示与交付落地。",
                 "system_prompt": (
-                    "你是“质量与风险审查员”。\n"
+                    "你是产品团队中的“工程师”。\n"
                     "职责：\n"
-                    "1) 从正确性、安全性、稳定性角度审查方案与输出；\n"
-                    "2) 识别回归风险、测试缺失与运维风险；\n"
-                    "3) 给出按优先级排序的修复建议与验收清单。\n"
+                    "1) 将需求与设计方案转化为技术实现路径；\n"
+                    "2) 提供代码级建议、架构取舍、落地步骤与风险提示；\n"
+                    "3) 说明实现边界、依赖、测试与交付方式。\n"
                     "输出规则：\n"
-                    "- 问题按严重度排序；\n"
-                    "- 区分已确认问题与假设；\n"
-                    "- 最后给出明确的 Go/No-Go 建议。"
+                    "- 优先给出务实、最小可行的实现建议；\n"
+                    "- 指出技术风险、复杂度与前置条件；\n"
+                    "- 需要时补充代码、命令或文件级说明。"
                 ),
-                "skill_names": ["Risk Review"],
+                "skill_names": ["Structured Reasoning", "Risk Review"],
             },
         ]
 
@@ -1511,6 +1605,9 @@ class SQLitePlaygroundStore:
             "Solution Architect": 0,
             "Implementation Engineer": 1,
             "QA & Risk Reviewer": 2,
+            "解决方案架构师": 0,
+            "实施工程师": 1,
+            "质量与风险审查员": 2,
         }
         legacy_prompt_markers = {
             "Architecture Coach": "You are an architecture specialist agent.",
@@ -1519,6 +1616,9 @@ class SQLitePlaygroundStore:
             "Solution Architect": "You are the Solution Architect in a software delivery team.",
             "Implementation Engineer": "You are the Implementation Engineer.",
             "QA & Risk Reviewer": "You are the QA and Risk Reviewer.",
+            "解决方案架构师": "你是软件交付团队中的“解决方案架构师”。",
+            "实施工程师": "你是“实施工程师”。",
+            "质量与风险审查员": "你是“质量与风险审查员”。",
         }
         for agent in agents:
             spec_index = legacy_to_new.get(agent.name)
@@ -1563,43 +1663,6 @@ class SQLitePlaygroundStore:
             desired = resolve_skill_ids(spec["skill_names"])
             if desired and not agent.skill_ids:
                 self.set_agent_skill_ids(agent.id, desired)
-        agents = self.list_agents()
-
-        default_agent_ids: list[str] = []
-        by_name = {agent.name: agent for agent in agents}
-        for spec in default_agent_specs:
-            matched = by_name.get(spec["name"])
-            if matched and matched.id not in default_agent_ids:
-                default_agent_ids.append(matched.id)
-        if len(default_agent_ids) < 3:
-            for agent in agents:
-                if agent.id in default_agent_ids:
-                    continue
-                default_agent_ids.append(agent.id)
-                if len(default_agent_ids) >= 3:
-                    break
-
-        if len(default_agent_ids) < 2:
-            return
-
-        existing_types = {workflow.type for workflow in self.list_workflows()}
-        default_workflows = [
-            ("Router", "router_specialists"),
-            ("Planner", "planner_executor"),
-            ("Supervisor", "supervisor_dynamic"),
-        ]
-        for workflow_name, workflow_type in default_workflows:
-            if workflow_type in existing_types:
-                continue
-            self.create_workflow(
-                WorkflowDefinitionCreate(
-                    name=workflow_name,
-                    type=workflow_type,
-                    specialist_agent_ids=default_agent_ids,
-                    finalizer_enabled=True,
-                )
-            )
-
         self._materialize_db_skills_to_files()
         self._migrate_and_clear_db_skills()
 

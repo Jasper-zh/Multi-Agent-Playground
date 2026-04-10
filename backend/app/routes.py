@@ -30,7 +30,11 @@ from .schemas import (
     WorkflowRunRequest,
     WorkflowRunResponse,
 )
-from .settings_bridge import reload_settings, settings, write_app_env_values
+from .settings_bridge import (
+    apply_structured_settings,
+    normalize_structured_settings,
+    settings,
+)
 from .skillhub_client import skillhub_client
 from .store import store
 from .workflows.planner_executor import build_planner_graph, run_planner_executor
@@ -49,29 +53,27 @@ def health() -> dict[str, str]:
 
 @router.get("/settings", response_model=AppSettings)
 def get_app_settings() -> AppSettings:
+    structured = normalize_structured_settings(store.get_app_settings_payload())
     return AppSettings(
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_base_url=settings.OPENAI_BASE_URL,
-        openai_model=settings.OPENAI_MODEL,
+        model_profiles=structured["model_profiles"],  # type: ignore[arg-type]
+        active_model_profile_id=str(structured["active_model_profile_id"] or "") or None,
+        env_vars=structured["env_vars"],  # type: ignore[arg-type]
         env_path=settings.APP_ENV_PATH,
     )
 
 
 @router.put("/settings", response_model=AppSettings)
 def update_app_settings(payload: AppSettings) -> AppSettings:
-    write_app_env_values(
-        {
-            "OPENAI_API_KEY": payload.openai_api_key,
-            "OPENAI_BASE_URL": payload.openai_base_url,
-            "OPENAI_MODEL": payload.openai_model,
-        }
-    )
-    reload_settings()
+    previous = store.get_app_settings_payload()
+    current = normalize_structured_settings(payload.model_dump())
+    store.save_app_settings_payload(current)
+    apply_structured_settings(previous, current)
     llm_gateway.refresh_client()
+    structured = normalize_structured_settings(store.get_app_settings_payload())
     return AppSettings(
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_base_url=settings.OPENAI_BASE_URL,
-        openai_model=settings.OPENAI_MODEL,
+        model_profiles=structured["model_profiles"],  # type: ignore[arg-type]
+        active_model_profile_id=str(structured["active_model_profile_id"] or "") or None,
+        env_vars=structured["env_vars"],  # type: ignore[arg-type]
         env_path=settings.APP_ENV_PATH,
     )
 
@@ -220,6 +222,24 @@ def update_agent(agent_id: str, payload: AgentDefinitionUpdate) -> AgentDefiniti
     return updated
 
 
+@router.delete("/agents/{agent_id}")
+def delete_agent(agent_id: str) -> dict[str, bool]:
+    agent = store.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    usage = store.agent_usage_workflows(agent_id)
+    if usage:
+        names = ", ".join(workflow.name for workflow in usage[:5])
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent is still used by workflow(s): {names}",
+        )
+
+    deleted = store.delete_agent(agent_id)
+    return {"deleted": deleted}
+
+
 @router.get("/workflows", response_model=list[WorkflowDefinition])
 def list_workflows() -> list[WorkflowDefinition]:
     return store.list_workflows()
@@ -270,6 +290,15 @@ def update_workflow(workflow_id: str, payload: WorkflowDefinitionUpdate) -> Work
     if updated is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
     return updated
+
+
+@router.delete("/workflows/{workflow_id}")
+def delete_workflow(workflow_id: str) -> dict[str, bool]:
+    workflow = store.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    deleted = store.delete_workflow(workflow_id)
+    return {"deleted": deleted}
 
 
 def _resolve_agents(workflow: WorkflowDefinition) -> list[AgentDefinition]:

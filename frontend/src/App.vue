@@ -14,6 +14,8 @@ import {
   createAgent,
   createConversation,
   createWorkflow,
+  deleteAgent,
+  deleteWorkflow,
   fetchAppSettings,
   fetchAgents,
   fetchConversation,
@@ -159,6 +161,17 @@ async function handleUpdateAgent(payload) {
   }
 }
 
+async function handleDeleteAgent(agentId) {
+  errorMessage.value = "";
+  try {
+    await deleteAgent(agentId);
+    agents.value = await fetchAgents();
+    workflows.value = await fetchWorkflows();
+  } catch (error) {
+    errorMessage.value = String(error.message || error);
+  }
+}
+
 function findSingleAgentChatWorkflow(agentId) {
   return (
     workflows.value.find(
@@ -218,6 +231,24 @@ async function handleUpdateWorkflow(payload) {
     workflows.value = await fetchWorkflows();
     if (selectedWorkflowId.value === updated.id) {
       await loadGraph(updated.id);
+    }
+  } catch (error) {
+    errorMessage.value = String(error.message || error);
+  }
+}
+
+async function handleDeleteWorkflow(workflowId) {
+  errorMessage.value = "";
+  try {
+    await deleteWorkflow(workflowId);
+    workflows.value = await fetchWorkflows();
+    if (selectedWorkflowId.value === workflowId) {
+      selectedWorkflowId.value = workflows.value[0]?.id || "";
+      if (selectedWorkflowId.value) {
+        await loadGraph(selectedWorkflowId.value);
+      } else {
+        selectedGraph.value = null;
+      }
     }
   } catch (error) {
     errorMessage.value = String(error.message || error);
@@ -469,6 +500,7 @@ onMounted(async () => {
             :skill-sync-status="skillSyncStatus"
             @create="handleCreateAgent"
             @update="handleUpdateAgent"
+            @delete="handleDeleteAgent"
             @quick-chat="handleQuickChatAgent"
           />
 
@@ -480,6 +512,7 @@ onMounted(async () => {
             :selected-workflow-id="selectedWorkflowId"
             @create="handleCreateWorkflow"
             @update="handleUpdateWorkflow"
+            @delete="handleDeleteWorkflow"
             @select="selectedWorkflowId = $event"
           />
 

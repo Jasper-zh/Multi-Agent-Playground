@@ -1,5 +1,5 @@
 <script setup>
-import { inject } from "vue";
+import { inject, ref } from "vue";
 import ChatRunner from "../components/ChatRunner.vue";
 import GraphViewer from "../components/GraphViewer.vue";
 import TraceViewer from "../components/TraceViewer.vue";
@@ -53,11 +53,20 @@ const emit = defineEmits(["run", "clear", "select-workflow"]);
 const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
 const workflowTypeLabel = i18n?.workflowTypeLabel || ((type) => type);
+const leftVisible = ref(true);
+const rightVisible = ref(true);
 </script>
 
 <template>
-  <div class="playground-grid">
-    <aside class="playground-col-left">
+  <div class="playground-shell">
+    <div
+      class="playground-grid"
+      :class="{
+        'left-collapsed': !leftVisible,
+        'right-collapsed': !rightVisible,
+      }"
+    >
+    <aside v-if="leftVisible" class="playground-col-left">
       <section class="glass-panel workflow-select-card">
         <label class="field-label">{{ t("workflow.selectWorkflow") }}</label>
         <select
@@ -83,14 +92,19 @@ const workflowTypeLabel = i18n?.workflowTypeLabel || ((type) => type);
         :selected-workflow-id="props.selectedWorkflowId"
         :selected-workflow="props.selectedWorkflow"
         :loading="props.loading"
+        :left-visible="leftVisible"
+        :right-visible="rightVisible"
         :messages="props.chatMessages"
         @run="$emit('run', $event)"
         @clear="$emit('clear')"
+        @toggle-left="leftVisible = !leftVisible"
+        @toggle-right="rightVisible = !rightVisible"
       />
     </section>
 
-    <aside class="playground-col-right">
+    <aside v-if="rightVisible" class="playground-col-right">
       <TraceViewer :trace="props.trace" :playing="props.tracePlaying" />
     </aside>
+    </div>
   </div>
 </template>

@@ -100,6 +100,12 @@ export function updateAgent(agentId, payload) {
   });
 }
 
+export function deleteAgent(agentId) {
+  return request(`/api/agents/${agentId}`, {
+    method: "DELETE",
+  });
+}
+
 export function fetchWorkflows() {
   return request("/api/workflows");
 }
@@ -115,6 +121,12 @@ export function updateWorkflow(workflowId, payload) {
   return request(`/api/workflows/${workflowId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteWorkflow(workflowId) {
+  return request(`/api/workflows/${workflowId}`, {
+    method: "DELETE",
   });
 }
 

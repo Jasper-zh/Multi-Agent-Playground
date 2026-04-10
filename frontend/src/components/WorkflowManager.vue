@@ -1,5 +1,5 @@
 <script setup>
-import { CheckCircle2, Plus, Workflow as WorkflowIcon } from "lucide-vue-next";
+import { CheckCircle2, Pencil, Plus, Trash2, Workflow as WorkflowIcon } from "lucide-vue-next";
 import { computed, inject, reactive, ref } from "vue";
 import { I18N_KEY } from "../i18n";
 
@@ -22,7 +22,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["create", "update", "select"]);
+const emit = defineEmits(["create", "update", "delete", "select"]);
 const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
 const workflowTypeLabel = i18n?.workflowTypeLabel || ((type) => type);
@@ -109,6 +109,13 @@ function cancelForm() {
   form.specialist_agent_ids = [];
   form.finalizer_enabled = true;
   form.router_prompt = "You are an orchestration router. Select the best specialist based on user intent.";
+}
+
+function removeWorkflow(workflowId) {
+  emit("delete", workflowId);
+  if (editingWorkflowId.value === workflowId) {
+    cancelForm();
+  }
 }
 
 async function submit() {
@@ -249,7 +256,24 @@ async function submit() {
             <CheckCircle2 :size="12" />
             {{ t("workflow.selected") }}
           </span>
-          <button class="workflow-edit-link" type="button" @click.stop="beginEdit(workflow)">Edit</button>
+          <div class="inline-actions compact-workflow-actions">
+            <button
+              class="workflow-icon-action"
+              type="button"
+              title="Edit Workflow"
+              @click.stop="beginEdit(workflow)"
+            >
+              <Pencil :size="14" />
+            </button>
+            <button
+              class="workflow-icon-action workflow-icon-delete"
+              type="button"
+              title="Delete Workflow"
+              @click.stop="removeWorkflow(workflow.id)"
+            >
+              <Trash2 :size="14" />
+            </button>
+          </div>
         </div>
       </article>
     </div>

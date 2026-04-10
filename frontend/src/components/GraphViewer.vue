@@ -202,19 +202,28 @@ const traversedEdgeKeys = computed(() => {
 
 function connectionPath(fromNode, toNode) {
   const radius = 26;
+  const dx = toNode.x - fromNode.x;
   const dy = toNode.y - fromNode.y;
-  const cp1x = fromNode.x;
-  const cp1y = fromNode.y + dy * 0.4;
-  const cp2x = toNode.x;
-  const cp2y = toNode.y - dy * 0.4;
+  const distance = Math.max(1, Math.hypot(dx, dy));
+  const unitX = dx / distance;
+  const unitY = dy / distance;
 
-  const endAngle = Math.atan2(toNode.y - cp2y, toNode.x - cp2x);
-  const endX = toNode.x - Math.cos(endAngle) * radius;
-  const endY = toNode.y - Math.sin(endAngle) * radius;
+  const startX = fromNode.x + unitX * radius;
+  const startY = fromNode.y + unitY * radius;
+  const endX = toNode.x - unitX * radius;
+  const endY = toNode.y - unitY * radius;
 
-  const startAngle = Math.atan2(cp1y - fromNode.y, cp1x - fromNode.x);
-  const startX = fromNode.x + Math.cos(startAngle) * radius;
-  const startY = fromNode.y + Math.sin(startAngle) * radius;
+  const verticalCurve = Math.abs(dy) >= Math.abs(dx)
+    ? Math.max(24, Math.abs(dy) * 0.4)
+    : 0;
+  const horizontalCurve = Math.abs(dx) > Math.abs(dy)
+    ? Math.max(24, Math.abs(dx) * 0.22)
+    : 0;
+
+  const cp1x = startX + horizontalCurve * Math.sign(dx || 1);
+  const cp1y = startY + verticalCurve * Math.sign(dy || 1);
+  const cp2x = endX - horizontalCurve * Math.sign(dx || 1);
+  const cp2y = endY - verticalCurve * Math.sign(dy || 1);
 
   return `M ${startX} ${startY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${endX} ${endY}`;
 }
@@ -263,8 +272,12 @@ watch(
 
 function onPointerMove(event) {
   if (!dragState.active || !dragState.nodeId) return;
-  const deltaX = event.clientX - dragState.startX;
-  const deltaY = event.clientY - dragState.startY;
+  const rect = canvasRef.value?.getBoundingClientRect();
+  if (!rect) return;
+  const localX = event.clientX - rect.left;
+  const localY = event.clientY - rect.top;
+  const deltaX = localX - dragState.startX;
+  const deltaY = localY - dragState.startY;
   nodeOffsets.value = {
     ...nodeOffsets.value,
     [dragState.nodeId]: {
@@ -281,11 +294,13 @@ function onPointerUp() {
 
 function onNodePointerDown(event, node) {
   event.preventDefault();
+  const rect = canvasRef.value?.getBoundingClientRect();
+  if (!rect) return;
   const offset = nodeOffsets.value[node.id] || { x: 0, y: 0 };
   dragState.active = true;
   dragState.nodeId = node.id;
-  dragState.startX = event.clientX;
-  dragState.startY = event.clientY;
+  dragState.startX = event.clientX - rect.left;
+  dragState.startY = event.clientY - rect.top;
   dragState.offsetX = offset.x;
   dragState.offsetY = offset.y;
 }

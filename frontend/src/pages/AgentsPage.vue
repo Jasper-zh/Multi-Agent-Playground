@@ -16,7 +16,7 @@ defineProps({
   },
 });
 
-defineEmits(["create", "update", "quick-chat"]);
+defineEmits(["create", "update", "delete", "quick-chat"]);
 </script>
 
 <template>
@@ -26,6 +26,7 @@ defineEmits(["create", "update", "quick-chat"]);
     :skill-sync-status="skillSyncStatus"
     @create="$emit('create', $event)"
     @update="$emit('update', $event)"
+    @delete="$emit('delete', $event)"
     @quick-chat="$emit('quick-chat', $event)"
   />
 </template>

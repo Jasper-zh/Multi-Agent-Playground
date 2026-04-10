@@ -39,7 +39,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["create", "update", "quick-chat"]);
+const emit = defineEmits(["create", "update", "delete", "quick-chat"]);
 const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
 
@@ -65,7 +65,7 @@ const themeTokens = [
   "agent-theme-rose",
   "agent-theme-indigo",
 ];
-const maxVisibleMetaItems = 4;
+const maxVisibleMetaItems = 3;
 
 const skillLibrary = computed(() =>
   props.skills.map((skill) => ({
@@ -96,11 +96,23 @@ const decoratedAgents = computed(() =>
     const builtinCapabilities = builtinCapabilityOptions.filter((option) =>
       (agent.builtin_capabilities || []).includes(option.id),
     );
+    const visibleSkills =
+      boundSkills.length > maxVisibleMetaItems
+        ? boundSkills.slice(0, maxVisibleMetaItems - 1)
+        : boundSkills.slice(0, maxVisibleMetaItems);
+    const visibleCapabilities =
+      builtinCapabilities.length > maxVisibleMetaItems
+        ? builtinCapabilities.slice(0, maxVisibleMetaItems - 1)
+        : builtinCapabilities.slice(0, maxVisibleMetaItems);
     return {
       ...agent,
       roleLabel,
-      boundSkills: boundSkills.slice(0, maxVisibleMetaItems),
-      builtinCapabilities: builtinCapabilities.slice(0, maxVisibleMetaItems),
+      allBoundSkills: boundSkills,
+      boundSkills: visibleSkills,
+      hiddenSkillCount: Math.max(0, boundSkills.length - visibleSkills.length),
+      allBuiltinCapabilities: builtinCapabilities,
+      builtinCapabilities: visibleCapabilities,
+      hiddenCapabilityCount: Math.max(0, builtinCapabilities.length - visibleCapabilities.length),
       theme: themeTokens[index % themeTokens.length],
     };
   }),
@@ -258,6 +270,13 @@ function beginEdit(agent) {
 
 function closeEdit() {
   editingAgent.value = null;
+}
+
+function removeAgent(agentId) {
+  emit("delete", agentId);
+  if (editingAgent.value?.id === agentId) {
+    closeEdit();
+  }
 }
 
 function removeEditingSkill(skillId) {
@@ -439,16 +458,24 @@ function getSkillDisplay(skillId) {
               >
                 <MessageCircle :size="18" />
               </button>
-              <button
-                class="icon-button"
-                type="button"
-                title="Edit Agent"
-                @click.stop="beginEdit(agent)"
-              >
-                <Settings2 :size="18" />
-              </button>
-            </div>
+            <button
+              class="icon-button"
+              type="button"
+              title="Edit Agent"
+              @click.stop="beginEdit(agent)"
+            >
+              <Settings2 :size="18" />
+            </button>
+            <button
+              class="icon-button"
+              type="button"
+              title="Delete Agent"
+              @click.stop="removeAgent(agent.id)"
+            >
+              <Trash2 :size="18" />
+            </button>
           </div>
+        </div>
 
           <div class="agent-card-title-block">
             <h4>{{ agent.name }}</h4>
@@ -464,7 +491,7 @@ function getSkillDisplay(skillId) {
           </p>
 
           <div class="agent-card-sections">
-            <div class="agent-installed-skills">
+            <div class="agent-installed-skills agent-meta-group">
               <p class="agent-installed-skills-title agent-section-title-skills">
                 <Zap :size="10" />
                 <span>Installed Skills</span>
@@ -480,11 +507,35 @@ function getSkillDisplay(skillId) {
                   </span>
                   <span>{{ skill.name }}</span>
                 </div>
+                <div
+                  v-if="agent.hiddenSkillCount > 0"
+                  class="agent-installed-skill agent-installed-skill-more agent-more-skill"
+                >
+                  +{{ agent.hiddenSkillCount }} more
+                </div>
+                <div
+                  v-if="agent.hiddenSkillCount > 0"
+                  class="agent-meta-popover"
+                >
+                  <p class="agent-meta-popover-title">All Skills</p>
+                  <div class="agent-meta-popover-list">
+                    <div
+                      v-for="skill in agent.allBoundSkills"
+                      :key="`${agent.id}_all_${skill.id}`"
+                      class="agent-installed-skill agent-meta-popover-pill"
+                    >
+                      <span class="agent-installed-skill-icon">
+                        <component :is="skill.icon" :size="12" />
+                      </span>
+                      <span>{{ skill.name }}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div v-else class="agent-empty-meta">No skills installed</div>
             </div>
 
-            <div class="agent-installed-skills">
+            <div class="agent-installed-skills agent-meta-group">
               <p class="agent-installed-skills-title agent-section-title-capabilities">
                 <FolderOpen :size="10" />
                 <span>Built-in Capabilities</span>
@@ -499,6 +550,30 @@ function getSkillDisplay(skillId) {
                     <component :is="capability.icon || FolderOpen" :size="12" />
                   </span>
                   <span>{{ capability.label }}</span>
+                </div>
+                <div
+                  v-if="agent.hiddenCapabilityCount > 0"
+                  class="agent-installed-skill agent-installed-skill-more capability-pill agent-more-capability"
+                >
+                  +{{ agent.hiddenCapabilityCount }} more
+                </div>
+                <div
+                  v-if="agent.hiddenCapabilityCount > 0"
+                  class="agent-meta-popover"
+                >
+                  <p class="agent-meta-popover-title">All Capabilities</p>
+                  <div class="agent-meta-popover-list">
+                    <div
+                      v-for="capability in agent.allBuiltinCapabilities"
+                      :key="`${agent.id}_allcap_${capability.id}`"
+                      class="agent-installed-skill capability-pill agent-meta-popover-pill"
+                    >
+                      <span class="agent-installed-skill-icon">
+                        <component :is="capability.icon || FolderOpen" :size="12" />
+                      </span>
+                      <span>{{ capability.label }}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
               <div v-else class="agent-empty-meta">No capabilities enabled</div>

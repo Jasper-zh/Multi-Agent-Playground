@@ -1,0 +1,20 @@
+{
+  "model_profiles": [
+    {
+      "id": "default",
+      "name": "Kimi",
+      "api_key": "sk-TxBMqIxWAmQ5YgQenkvQnhZv1Mj4vp59v5VyInAVh4Bos8YB",
+      "base_url": "https://api.moonshot.cn/v1",
+      "model": "moonshot-v1-8k"
+    },
+    {
+      "id": "profile_1775750518480_1",
+      "name": "zhipu",
+      "api_key": "3dd8e0b86ddc4184aa1281afe96fcb9a.4KpNjsh8UO1Mm9dS",
+      "base_url": "https://open.bigmodel.cn/api/anthropic",
+      "model": "glm-5"
+    }
+  ],
+  "active_model_profile_id": "default",
+  "env_vars": []
+}

@@ -197,8 +197,21 @@ class ConversationDetail(Conversation):
     messages: list[Message] = Field(default_factory=list)
 
 
+class ModelProfile(BaseModel):
+    id: str
+    name: str = "Default"
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+
+
+class EnvVarEntry(BaseModel):
+    key: str = Field(min_length=1)
+    value: str = ""
+
+
 class AppSettings(BaseModel):
-    openai_api_key: str = ""
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4o-mini"
+    model_profiles: list[ModelProfile] = Field(default_factory=list)
+    active_model_profile_id: str | None = None
+    env_vars: list[EnvVarEntry] = Field(default_factory=list)
     env_path: str = ""

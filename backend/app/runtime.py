@@ -2586,11 +2586,11 @@ class LLMGateway:
             for item in filtered_skills
         ]
 
-        must_call_tool = any(
-            str(item.get("tool_kind") or "") == "builtin"
-            or str(item.get("execution_mode") or "") != "builtin_fs"
+        has_non_builtin_tools = any(
+            str(item.get("tool_kind") or "") != "builtin"
             for item in filtered_skills
         )
+        must_call_tool = has_non_builtin_tools or self._looks_like_filesystem_intent(user_input)
 
         for _ in range(4):
             response = self.client.chat.completions.create(

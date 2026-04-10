@@ -1,11 +1,20 @@
 const { app, BrowserWindow, dialog } = require("electron");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const http = require("http");
+const fs = require("fs");
 const path = require("path");
 
 const DESKTOP_BACKEND_PORT = Number(process.env.AGENT_PLAYGROUND_DESKTOP_PORT || 38011);
 
 let backendProcess = null;
+
+function resolveBackendHome() {
+  return path.join(app.getPath("userData"), "backend");
+}
+
+function resolveBackendPidFile() {
+  return path.join(resolveBackendHome(), "backend.pid");
+}
 
 function resolveBackendExecutable() {
   const exeName = process.platform === "win32" ? "agent-playground-backend.exe" : "agent-playground-backend";
@@ -57,7 +66,8 @@ function waitForBackend(url, timeoutMs = 20000) {
 
 async function startBackend() {
   const executablePath = resolveBackendExecutable();
-  const userDataBackendHome = path.join(app.getPath("userData"), "backend");
+  const userDataBackendHome = resolveBackendHome();
+  fs.mkdirSync(userDataBackendHome, { recursive: true });
   const env = {
     ...process.env,
     AGENT_PLAYGROUND_HOST: "127.0.0.1",
@@ -67,17 +77,62 @@ async function startBackend() {
     AGENT_PLAYGROUND_BUNDLED_SKILLS_ROOT: resolveBundledSkillsRoot(),
   };
 
+  await stopBackendProcess();
+
   backendProcess = spawn(executablePath, [], {
     env,
-    stdio: "inherit",
+    stdio: "ignore",
     windowsHide: true,
+    detached: process.platform !== "win32",
   });
+
+  try {
+    fs.writeFileSync(resolveBackendPidFile(), String(backendProcess.pid || ""), "utf-8");
+  } catch {}
 
   backendProcess.on("exit", () => {
     backendProcess = null;
+    try {
+      fs.rmSync(resolveBackendPidFile(), { force: true });
+    } catch {}
   });
 
   await waitForBackend(`http://127.0.0.1:${DESKTOP_BACKEND_PORT}/api/health`);
+}
+
+async function stopBackendProcess() {
+  const pidFile = resolveBackendPidFile();
+  let targetPid = backendProcess?.pid || 0;
+
+  if (!targetPid) {
+    try {
+      if (fs.existsSync(pidFile)) {
+        const raw = fs.readFileSync(pidFile, "utf-8").trim();
+        targetPid = Number(raw || 0);
+      }
+    } catch {}
+  }
+
+  if (!targetPid) {
+    return;
+  }
+
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(targetPid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      try {
+        process.kill(-targetPid, "SIGTERM");
+      } catch {
+        process.kill(targetPid, "SIGTERM");
+      }
+    }
+  } catch {}
+
+  backendProcess = null;
+  try {
+    fs.rmSync(pidFile, { force: true });
+  } catch {}
 }
 
 async function createWindow() {
@@ -132,8 +187,9 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
+  void stopBackendProcess();
+});
+
+app.on("will-quit", () => {
+  void stopBackendProcess();
 });

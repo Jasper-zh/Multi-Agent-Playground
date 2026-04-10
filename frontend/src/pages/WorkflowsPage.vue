@@ -20,7 +20,7 @@ defineProps({
   },
 });
 
-defineEmits(["create", "update", "select"]);
+defineEmits(["create", "update", "delete", "select"]);
 </script>
 
 <template>
@@ -31,6 +31,7 @@ defineEmits(["create", "update", "select"]);
     :selected-workflow-id="selectedWorkflowId"
     @create="$emit('create', $event)"
     @update="$emit('update', $event)"
+    @delete="$emit('delete', $event)"
     @select="$emit('select', $event)"
   />
 </template>
