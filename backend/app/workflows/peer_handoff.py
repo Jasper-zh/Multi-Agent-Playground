@@ -79,6 +79,8 @@ class RootCompletionDecision(TypedDict, total=False):
 
 PEER_HANDOFF_ACTION_EXAMPLES = (
     "## Examples\n"
+    "### Continue\n"
+    '{"action":"continue","message":"I confirmed the workspace and existing files. The remaining JavaScript behavior is still missing, so I should continue implementing it myself before handing off or completing."}\n\n'
     "### Handoff\n"
     '{"action":"handoff","target_agent_id":"agent_designer","task_title":"Create UI/UX design based on the completed PRD","message":"I completed the PRD with scope, core features, and acceptance criteria. Please produce the UI/UX design next."}\n\n'
     "### Complete\n"
@@ -128,10 +130,13 @@ def _build_peer_execution_prompt(
         "- Prefer doing the necessary file operations over repeatedly listing or describing what should be done.\n"
         "- Make reasonable assumptions and continue when optional preferences or non-critical details are missing.\n"
         "- Do not pause execution just to ask for style, naming, or preference details that can be sensibly defaulted.\n"
-        "- Do not claim a file, document, mockup, design稿, screenshot, or artifact was created unless you actually created it or verified it with successful tool results.\n"
+        "- Only report files, directories, documents, mockups, screenshots, code, behaviors, or artifacts that you actually created or verified with successful tool results in this run.\n"
+        "- If a file or artifact has not been created yet, say it is not yet created; do not imply it already exists.\n"
+        "- If functionality has not been implemented or verified yet, say it is still missing; do not describe it as already working.\n"
+        "- Never invent tool results, file contents, validation outcomes, browser checks, or successful delivery states.\n"
         "- If you cannot complete the current task, state the real blocker and what you already completed or verified.\n"
         "- If the current task is to build a page, app, tool, or feature, do not treat visual styling alone as completion when interactive behavior or functional logic is still missing.\n"
-        "- Summarize the concrete work actually completed at the end of this execution step.\n\n"
+        "- Summarize only the concrete work actually completed and verified at the end of this execution step.\n\n"
         "## Context\n"
         f"Original user request:\n{user_input}\n\n"
         f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
@@ -139,6 +144,15 @@ def _build_peer_execution_prompt(
         f"Available peers:\n{peer_directory}\n\n"
         f"Current task:\n{current_task_title}"
     )
+
+
+PEER_EXECUTION_FINAL_RESPONSE_INSTRUCTION = (
+    "Using the tool results already collected above, respond with an execution summary only. "
+    "Do not decide workflow actions in this step. "
+    "Only claim files, directories, artifacts, validations, and implemented behavior that are explicitly supported by successful tool results in this run. "
+    "If something is still missing, say it is still missing. "
+    "Do not invent created files, completed functionality, or successful verification that did not happen."
+)
 
 
 def _build_peer_decision_prompt(
@@ -155,6 +169,7 @@ def _build_peer_decision_prompt(
         "You are the same peer agent that just executed the task. Now decide the next workflow action.\n"
         "Return exactly one JSON object and nothing else. Do not use markdown outside the JSON object.\n\n"
         "## Allowed actions\n"
+        '- {"action":"continue","message":"<what you will continue doing next>"}\n'
         '- {"action":"handoff","target_agent_id":"<peer-id>","task_title":"<next task>","message":"<handoff reason>"}\n'
         '- {"action":"review","target_agent_id":"<peer-id>","task_title":"<review task>","message":"<review reason>"}\n'
         '- {"action":"complete","message":"<task result>"}\n'
@@ -164,11 +179,12 @@ def _build_peer_decision_prompt(
         "- Base the decision on the execution result and the original user request.\n"
         "- Use `complete` only if the original user request is fully satisfied by the accumulated outputs.\n"
         "- If the current step is done but the original user request still needs more work, use `handoff` to the most suitable peer with a concrete next task.\n"
-        "- If you are still the best peer and more work remains, use `handoff` to a suitable peer only when another peer is better; otherwise set the next task for yourself is not allowed, so explain the remaining work for the best peer.\n"
+        "- If you are still the best peer and more work remains, use `continue` instead of `handoff` or `block`.\n"
         "- Use `respond_user` only when the user explicitly asked for a direct answer now, or when missing information creates a real blocker that prevents sensible progress.\n"
         "- Do not ask the user for optional preferences; make reasonable assumptions and continue via handoff when possible.\n"
         "- Do not claim a file, document, mockup, screenshot, or artifact was created unless the execution result or previous outputs actually support that claim.\n"
-        "- Never target yourself.\n\n"
+        "- Do not claim tool restrictions, permission errors, disabled capabilities, or environment limits unless the execution result or tool outputs explicitly show them.\n"
+        "- Never target yourself with `handoff` or `review`; use `continue` when you should keep working.\n\n"
         "## Context\n"
         f"Original user request:\n{user_input}\n\n"
         f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
@@ -198,7 +214,8 @@ PEER_HANDOFF_FINAL_RESPONSE_INSTRUCTION = (
     'Do not use "complete" for a static shell, placeholder UI, or partial implementation when the current task still requires functional behavior. '
     'If downstream work remains, prefer "handoff". '
     'Use "block" only for a real blocker, not for incomplete execution or runtime summary text. '
-    'Allowed actions: {"action":"handoff","target_agent_id":"<peer-id>","task_title":"<next task>","message":"<handoff reason>"}, '
+    'Allowed actions: {"action":"continue","message":"<what you will continue doing next>"}, '
+    '{"action":"handoff","target_agent_id":"<peer-id>","task_title":"<next task>","message":"<handoff reason>"}, '
     '{"action":"review","target_agent_id":"<peer-id>","task_title":"<review task>","message":"<review reason>"}, '
     '{"action":"complete","message":"<task result>"}, '
     '{"action":"respond_user","message":"<final user-facing answer>"}, '
@@ -241,6 +258,8 @@ def _extract_json_object(raw: str) -> dict[str, Any] | None:
 
 def _normalize_action_name(raw: str) -> str:
     lowered = str(raw or "").strip().lower()
+    if lowered in {"continue", "continue_self", "keep_going"}:
+        return "continue"
     if lowered in {"handoff", "delegate", "handoff_to"}:
         return "handoff"
     if lowered in {"review", "review_by", "request_review"}:
@@ -260,7 +279,7 @@ def _parse_agent_action(raw_response: str) -> AgentAction | None:
         return None
 
     action = _normalize_action_name(payload.get("action", ""))
-    if action not in {"handoff", "review", "complete", "respond_user", "block"}:
+    if action not in {"continue", "handoff", "review", "complete", "respond_user", "block"}:
         return None
 
     result: AgentAction = {
@@ -315,7 +334,7 @@ def _validate_agent_action(action: AgentAction) -> str | None:
             return f"{action_name} requires task_title"
         if not message:
             return f"{action_name} requires message"
-    elif action_name in {"complete", "respond_user", "block"} and not message:
+    elif action_name in {"continue", "complete", "respond_user", "block"} and not message:
         return f"{action_name} requires message"
 
     if message and _contains_internal_runtime_text(message):
@@ -357,6 +376,7 @@ def _repair_agent_action(
         "Your only job is to convert the worker output into ONE valid JSON action.\n"
         "Do not do the task again. Do not add markdown. Do not output prose outside JSON.\n\n"
         "Allowed actions:\n"
+        '- {"action":"continue","message":"<what you will continue doing next>"}\n'
         '- {"action":"handoff","target_agent_id":"<peer-id>","task_title":"<next task>","message":"<handoff reason>"}\n'
         '- {"action":"review","target_agent_id":"<peer-id>","task_title":"<review task>","message":"<review reason>"}\n'
         '- {"action":"complete","message":"<task result>"}\n'
@@ -370,12 +390,13 @@ def _repair_agent_action(
         "- Rewrite weak messages into concrete summaries of completed work and remaining work when needed.\n"
         "- Prefer continuing with reasonable assumptions over asking the user for optional preferences.\n"
         "- Use respond_user only for a direct user-facing answer or a real blocker that truly needs user input.\n"
+        "- If the same peer should keep working, prefer continue over block or self-handoff.\n"
         "- Do not preserve claims about created files, documents, mockups, screenshots, or artifacts unless the original output clearly states they were actually produced or verified.\n"
         "- Do not preserve vague completion claims for static shells, placeholder UI, or partial implementations when the current task still expects functional behavior.\n"
         "- If the output suggests another specialist should continue, prefer handoff.\n"
         "- If the output indicates a real blocker with no clear next peer, use block.\n"
         "- If the output contains a usable task result and no handoff is needed, use complete.\n"
-        "- Never target the current worker.\n\n"
+        "- Never target the current worker with handoff or review.\n\n"
         f"Why the original output is invalid:\n{invalid_reason}\n\n"
         f"Current worker:\n- id={worker.id}; name={worker.name}; description={worker.description}\n\n"
         f"Available peers:\n{peer_lines}\n\n"
@@ -461,6 +482,7 @@ def _review_root_completion(
     *,
     user_input: str,
     current_task_title: str,
+    workspace_context: str,
     last_worker: AgentDefinition,
     workers: list[AgentDefinition],
     reports: list[str],
@@ -475,12 +497,6 @@ def _review_root_completion(
         for worker in workers
     ) or "(no peers)"
     available_outputs = _available_outputs_block(reports)
-    workspace_context = _workspace_context_text(
-        PeerState(
-            confirmed_workspace="",
-            confirmed_paths=[],
-        )
-    )
     prompt = (
         "You are the root-task completion reviewer for a peer handoff workflow.\n"
         "Your job is to decide whether the ORIGINAL user request is fully complete, not just whether the current subtask looks complete.\n\n"
@@ -859,6 +875,7 @@ def run_peer_handoff(
                 execution_input,
                 history=history,
                 trace_hook=make_tool_trace_hook(worker),
+                final_response_instruction=PEER_EXECUTION_FINAL_RESPONSE_INSTRUCTION,
             )
             execution_result = _sanitize_action_message(execution_result) or "No execution result was produced."
 
@@ -999,6 +1016,29 @@ def run_peer_handoff(
             _, _, last_message = str(reports[-1]).partition(":\n")
             action_message = last_message.strip()
 
+        if action_name == "continue":
+            current_worker_id = str(state.get("last_worker_id") or state.get("current_owner_id") or "")
+            current_worker_name = str(state.get("last_worker_name") or state.get("current_owner_name") or "")
+            rewritten_task = str(state.get("pending_task_title") or "").strip() or str(state.get("current_task_title", user_input))
+            push(
+                trace,
+                event(
+                    "route_selected",
+                    "Continue Current Peer",
+                    f"{current_worker_name} will continue the current task.",
+                    node_id=current_worker_id,
+                    next_node_id=current_worker_id,
+                    reason=action_message[:180],
+                    task_title=rewritten_task,
+                    hop_count=state.get("hop_count", 0),
+                ),
+            )
+            return {
+                "current_owner_id": current_worker_id,
+                "current_owner_name": current_worker_name,
+                "current_task_title": rewritten_task,
+            }
+
         if action_name in {"handoff", "review"}:
             target_agent_id = str(state.get("pending_target_agent_id") or "").strip()
             next_task_title = str(state.get("pending_task_title") or "").strip() or state.get("current_task_title", user_input)
@@ -1077,6 +1117,7 @@ def run_peer_handoff(
         root_decision = _review_root_completion(
             user_input=state["user_input"],
             current_task_title=str(state.get("current_task_title", state["user_input"])),
+            workspace_context=_workspace_context_text(state),
             last_worker=current_worker,
             workers=workers,
             reports=list(state.get("reports", [])),
@@ -1144,7 +1185,7 @@ def run_peer_handoff(
 
     def decision_next(state: PeerState) -> str:
         action_name = str(state.get("pending_action") or "")
-        if action_name in {"handoff", "review"} and not state.get("terminal_status"):
+        if action_name in {"continue", "handoff", "review"} and not state.get("terminal_status"):
             owner_id = str(state.get("current_owner_id") or "")
             return _peer_exec_node_id(owner_id) if owner_id else _peer_exec_node_id(workers[0].id)
         if workflow.finalizer_enabled:
