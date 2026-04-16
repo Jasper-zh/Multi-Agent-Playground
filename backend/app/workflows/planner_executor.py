@@ -551,23 +551,16 @@ def run_planner_executor(
                     task_index=human_index,
                 ),
             )
-            plan_lines = [
-                f"{index + 1}. {task}"
-                for index, task in enumerate(tasks)
-            ]
-            plan_text = "\n".join(plan_lines) if plan_lines else "No plan available."
             prior_reports = list(state.get("task_reports", []))
             prior_reports_text = "\n\n".join(prior_reports) if prior_reports else "None yet."
             worker_input = (
                 f"Original user request:\n{state['user_input']}\n\n"
-                "Approved plan:\n"
-                f"{plan_text}\n\n"
-                "Completed task outputs so far:\n"
+                "What is already available from previous work:\n"
                 f"{prior_reports_text}\n\n"
                 f"Current task {human_index}:\n{state['current_task']}\n\n"
                 "Execute the current task directly.\n"
                 "This is an execution task, not a discussion task. Prefer tool actions over prose.\n"
-                "Build on prior task outputs when relevant instead of ignoring them.\n\n"
+                "Build on the available prior work when relevant instead of ignoring it.\n\n"
                 "Hard rules:\n"
                 "1. If the task involves files, directories, code, project outputs, desktop paths, downloads paths, or generated artifacts, you must use filesystem tools to verify or create them before making factual claims.\n"
                 "2. Do not guess whether a file, directory, project, or output exists.\n"
@@ -576,14 +569,18 @@ def run_planner_executor(
                 "5. Do not replace a missing tool action with speculation.\n"
                 "6. Do not write a project-management update, a plan recap, or generic suggestions unless the current task is explicitly analysis-only.\n"
                 "7. If you changed, created, or verified files, say exactly which paths were involved.\n"
-                "8. If you could not complete the task, state the exact blocker and what you already verified with tools.\n\n"
+                "8. If you could not complete the task, state the exact blocker and what you already verified with tools.\n"
+                "9. If the current task is to build a page, app, feature, or tool, do not treat a static shell or styling-only output as completion when functional behavior is still required by the task.\n"
+                "10. Your result message must summarize the concrete implemented behavior, not only visual or structural changes.\n\n"
                 "Execution policy:\n"
                 "- Need to know whether something exists: check with tools first.\n"
+                "- If the target path or deliverable is already clear, prefer directly creating or writing it instead of repeatedly listing or searching first.\n"
                 "- Need a directory: create it.\n"
                 "- Need a file: write it.\n"
                 "- Need file contents: read it.\n"
                 "- Need to find the right target: search/list first, then operate.\n\n"
-                "Respond in natural language with the concrete result of the current task only."
+                "Respond in natural language with the concrete result of the current task only. "
+                "If the task expects working behavior, describe the implemented behavior explicitly rather than only saying that files or UI were created."
             )
             task_answer = llm_gateway.run_agent(
                 worker,

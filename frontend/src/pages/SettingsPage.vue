@@ -55,6 +55,13 @@ const providerPresets = [
     model: "glm-4.5",
   },
   {
+    id: "minimax",
+    label: "MiniMax",
+    name: "MiniMax",
+    base_url: "https://api.minimaxi.com/v1",
+    model: "MiniMax-M2.7",
+  },
+  {
     id: "custom",
     label: "其他",
     name: "",

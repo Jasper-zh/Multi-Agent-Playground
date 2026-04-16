@@ -202,6 +202,7 @@ class ConversationDetail(Conversation):
 
 class ModelProfile(BaseModel):
     id: str
+    provider: str = "custom"
     name: str = "Default"
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"

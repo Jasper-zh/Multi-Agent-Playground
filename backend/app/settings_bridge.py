@@ -127,6 +127,7 @@ def default_structured_settings() -> dict[str, object]:
         "model_profiles": [
             {
                 "id": "default",
+                "provider": "custom",
                 "name": "Default",
                 "api_key": settings.OPENAI_API_KEY,
                 "base_url": settings.OPENAI_BASE_URL,
@@ -149,6 +150,7 @@ def _normalize_model_profiles(raw_profiles: object) -> list[dict[str, str]]:
         normalized.append(
             {
                 "id": profile_id,
+                "provider": str(item.get("provider") or "custom").strip() or "custom",
                 "name": str(item.get("name") or f"Profile {index + 1}").strip() or f"Profile {index + 1}",
                 "api_key": str(item.get("api_key") or "").strip(),
                 "base_url": str(item.get("base_url") or "https://api.openai.com/v1").strip()

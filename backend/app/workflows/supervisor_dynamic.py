@@ -414,7 +414,10 @@ def run_supervisor_dynamic(
             worker_input = (
                 f"Original user request:\n{state['user_input']}\n\n"
                 f"Current focus task (cycle {cycle}):\n{state['current_focus_task']}\n\n"
-                f"Completed reports so far:\n{completed_summary}"
+                f"Completed reports so far:\n{completed_summary}\n\n"
+                "Execute the current focus task directly.\n"
+                "If the target path or deliverable is already clear, prefer directly creating or writing it instead of repeatedly listing or searching first.\n"
+                "Use inspection first only when the path is ambiguous, existing content must be preserved, or you need facts you do not yet have."
             )
             worker_answer = llm_gateway.run_agent(
                 worker,
