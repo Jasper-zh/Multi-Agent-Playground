@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypedDict
 
 from fastapi import HTTPException
@@ -125,6 +126,9 @@ def _build_peer_execution_prompt(
         "Execute the current task directly. Do not output workflow action JSON in this step.\n\n"
         "## Execution rules\n"
         "- Focus on doing the current task, not deciding the next workflow action.\n"
+        "- The confirmed delivery/workspace path below is authoritative shared team state. Preserve it across all file operations and handoffs.\n"
+        "- When filesystem work is needed and a confirmed delivery/workspace path is present, use absolute fs_* paths rooted at that location.\n"
+        "- Do not use bare relative filesystem paths for delivery work in this workflow.\n"
         "- If the current task is not fully complete and you can continue, continue executing instead of returning a progress update.\n"
         "- If the task gives a clear target path or deliverable, create or update it directly; inspect first only when the path is ambiguous, existing content must be preserved, or you need facts you do not have.\n"
         "- Prefer doing the necessary file operations over repeatedly listing or describing what should be done.\n"
@@ -179,12 +183,15 @@ def _build_peer_decision_prompt(
         "- Base the decision on the execution result and the original user request.\n"
         "- Use `complete` only if the original user request is fully satisfied by the accumulated outputs.\n"
         "- If the current step is done but the original user request still needs more work, use `handoff` to the most suitable peer with a concrete next task.\n"
-        "- If you are still the best peer and more work remains, use `continue` instead of `handoff` or `block`.\n"
+        "- If another peer can materially improve the result, use `handoff` or `review` with a concrete task instead of doing everything yourself.\n"
+        "- If you are still clearly the best peer and more work remains, use `continue` instead of `handoff` or `block`.\n"
         "- Use `respond_user` only when the user explicitly asked for a direct answer now, or when missing information creates a real blocker that prevents sensible progress.\n"
         "- Do not ask the user for optional preferences; make reasonable assumptions and continue via handoff when possible.\n"
         "- Do not claim a file, document, mockup, screenshot, or artifact was created unless the execution result or previous outputs actually support that claim.\n"
         "- Do not claim tool restrictions, permission errors, disabled capabilities, or environment limits unless the execution result or tool outputs explicitly show them.\n"
-        "- Never target yourself with `handoff` or `review`; use `continue` when you should keep working.\n\n"
+        "- Never target yourself with `handoff` or `review`; use `continue` when you should keep working.\n"
+        "- Handoff and review task_title must preserve the confirmed delivery/workspace path when one exists.\n"
+        "- If the next task requires filesystem work, repeat the confirmed delivery/workspace path explicitly in task_title or message, and describe paths as absolute paths.\n\n"
         "## Context\n"
         f"Original user request:\n{user_input}\n\n"
         f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
@@ -468,14 +475,102 @@ def _available_outputs_block(reports: list[str]) -> str:
 def _workspace_context_text(state: PeerState) -> str:
     confirmed_workspace = str(state.get("confirmed_workspace") or "").strip()
     confirmed_paths = [str(item).strip() for item in (state.get("confirmed_paths") or []) if str(item).strip()]
+    rendered_paths: list[str] = []
+    for item in confirmed_paths[-6:]:
+        candidate = Path(item).expanduser()
+        if candidate.is_absolute() or not confirmed_workspace:
+            rendered_paths.append(str(candidate if candidate.is_absolute() else item))
+        else:
+            rendered_paths.append(str((Path(confirmed_workspace) / item).resolve()))
     if confirmed_workspace and confirmed_paths:
-        paths_block = "\n".join(f"- {path}" for path in confirmed_paths[-6:])
+        paths_block = "\n".join(f"- {path}" for path in rendered_paths)
         return f"{confirmed_workspace}\nConfirmed files:\n{paths_block}"
     if confirmed_workspace:
         return confirmed_workspace
-    if confirmed_paths:
-        return "\n".join(f"- {path}" for path in confirmed_paths[-6:])
-    return "Not confirmed yet. If the original request specifies a delivery location, keep using that same location consistently."
+    if rendered_paths:
+        return "\n".join(f"- {path}" for path in rendered_paths)
+    return "Not confirmed yet."
+
+
+def _determine_initial_workspace(user_input: str) -> str:
+    text = str(user_input or "").strip()
+    if not text or not llm_gateway.api_configured or llm_gateway.client is None:
+        return ""
+
+    prompt = (
+        "Extract the user's explicitly requested delivery/workspace path if one is stated.\n"
+        "Return JSON only in this shape:\n"
+        '{"workspace_path":"<string or empty>"}\n\n'
+        "Rules:\n"
+        "- Only return a workspace_path when the user explicitly states a delivery or work location.\n"
+        "- Preserve the user's wording for that location.\n"
+        "- If no explicit location is stated, return an empty string.\n\n"
+        f"User request:\n{text}"
+    )
+
+    try:
+        response = llm_gateway.client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+    raw = str(response.choices[0].message.content or "").strip()
+    if not raw:
+        return ""
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        brace = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not brace:
+            return ""
+        try:
+            parsed = json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            return ""
+
+    if not isinstance(parsed, dict):
+        return ""
+    workspace_text = str(parsed.get("workspace_path") or "").strip()
+    if not workspace_text:
+        return ""
+    normalized = workspace_text.replace("\\", "/")
+    lowered = normalized.lower()
+    home = Path.home()
+
+    if lowered in {"desktop", "桌面", "我的桌面"}:
+        return str((home / "Desktop").resolve())
+    if lowered.startswith("desktop/") or lowered.startswith("桌面/") or lowered.startswith("我的桌面/"):
+        tail = normalized.split("/", 1)[1].strip()
+        return str((home / "Desktop" / tail).resolve())
+    if lowered in {"downloads", "download", "下载"}:
+        return str((home / "Downloads").resolve())
+    if lowered.startswith("downloads/") or lowered.startswith("download/") or lowered.startswith("下载/"):
+        tail = normalized.split("/", 1)[1].strip()
+        return str((home / "Downloads" / tail).resolve())
+
+    candidate = Path(workspace_text).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve())
+    return ""
+
+
+def _task_with_workspace(task_text: str, workspace: str) -> str:
+    task = str(task_text or "").strip()
+    confirmed_workspace = str(workspace or "").strip()
+    if not confirmed_workspace:
+        return task
+    if confirmed_workspace in task:
+        return task
+    suffix = f"Shared workspace directory: {confirmed_workspace}. Use absolute filesystem paths under this directory."
+    return f"{task}\n\n{suffix}" if task else suffix
 
 
 def _review_root_completion(
@@ -1235,10 +1330,13 @@ def run_peer_handoff(
         finalizer_node=finalizer_node if workflow.finalizer_enabled else None,
     )
     graph = build_peer_handoff_graph(workflow, workers)
+    initial_workspace = _determine_initial_workspace(user_input)
     final_state = app.invoke(
         {
             "user_input": user_input,
             "current_task_title": user_input,
+            "confirmed_workspace": initial_workspace,
+            "confirmed_paths": [],
             "reports": [],
             "hop_count": 0,
             "max_hops": max_hops,
