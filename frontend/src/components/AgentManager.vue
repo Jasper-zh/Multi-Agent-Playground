@@ -472,8 +472,8 @@ function getSkillDisplay(skillId) {
             <span class="chip role-chip agent-role-pill" :title="agent.description">{{ agent.roleLabel }}</span>
           </div>
 
-          <p class="agent-summary agent-prompt-preview" :title="agent.description || ''">
-            {{ previewPrompt(agent.description) || "-" }}
+          <p class="agent-summary agent-prompt-preview" :title="agent.system_prompt || ''">
+            {{ previewPrompt(agent.system_prompt) || "-" }}
           </p>
 
           <div class="agent-card-sections">

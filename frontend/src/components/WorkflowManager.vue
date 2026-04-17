@@ -27,6 +27,12 @@ const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
 const workflowTypeLabel = i18n?.workflowTypeLabel || ((type) => type);
 const workflowTypeDesc = i18n?.workflowTypeDesc || ((_type, fallback) => fallback || _type);
+const managedWorkflowTypes = [
+  "router_specialists",
+  "planner_executor",
+  "supervisor_dynamic",
+  "peer_handoff",
+];
 
 const isAdding = ref(false);
 const editingWorkflowId = ref("");
@@ -52,6 +58,14 @@ const requiredAgentCount = computed(() => {
   const found = props.templates.find((template) => template.type === form.type);
   return found?.required_agent_count || 2;
 });
+
+const workflowTypeOptions = computed(() =>
+  props.templates.filter((template) => managedWorkflowTypes.includes(template.type)),
+);
+
+const visibleWorkflows = computed(() =>
+  props.workflows.filter((workflow) => managedWorkflowTypes.includes(workflow.type)),
+);
 
 const canSubmit = computed(() =>
   Boolean(form.name.trim()) && form.specialist_agent_ids.length >= requiredAgentCount.value,
@@ -90,6 +104,7 @@ function beginCreate() {
 }
 
 function beginEdit(workflow) {
+  if (!managedWorkflowTypes.includes(workflow.type)) return;
   isAdding.value = false;
   editingWorkflowId.value = workflow.id;
   form.name = workflow.name || "";
@@ -159,11 +174,13 @@ async function submit() {
             <h4>{{ editingWorkflowId ? "Edit Workflow" : "Basic Config" }}</h4>
             <input v-model="form.name" :placeholder="t('workflow.name')" />
             <select v-model="form.type" class="workflow-native-select">
-              <option value="router_specialists">{{ workflowTypeLabel("router_specialists") }}</option>
-              <option value="planner_executor">{{ workflowTypeLabel("planner_executor") }}</option>
-              <option value="supervisor_dynamic">{{ workflowTypeLabel("supervisor_dynamic") }}</option>
-              <option value="single_agent_chat">{{ workflowTypeLabel("single_agent_chat") }}</option>
-              <option value="peer_handoff">{{ workflowTypeLabel("peer_handoff") }}</option>
+              <option
+                v-for="template in workflowTypeOptions"
+                :key="template.type"
+                :value="template.type"
+              >
+                {{ workflowTypeLabel(template.type) }}
+              </option>
             </select>
             <textarea
               v-model="form.description"
@@ -214,7 +231,7 @@ async function submit() {
       </article>
 
       <article
-        v-for="workflow in props.workflows"
+        v-for="workflow in visibleWorkflows"
         :key="workflow.id"
         class="glass-panel workflow-card workflow-card-rich"
         :class="{ selected: workflow.id === props.selectedWorkflowId }"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import PurePosixPath
 from typing import Any, TypedDict
 
 from fastapi import HTTPException
@@ -29,6 +30,9 @@ class SupervisorState(TypedDict, total=False):
     user_input: str
     max_cycles: int
     cycle: int
+    workspace_dir: str
+    artifacts: list[str]
+    tool_evidence: list[str]
     current_focus_task: str
     current_worker_id: str
     current_worker_name: str
@@ -61,6 +65,38 @@ def _estimate_max_cycles(user_input: str) -> int:
     if any(token in text for token in ("以及", "并且", "同时", "另外", "对比", "区别", "优缺点", "先", "再")):
         return 4
     return 3
+
+
+def _derive_workspace_dir(artifacts: list[str]) -> str:
+    cleaned = [str(item).strip().replace("\\", "/") for item in artifacts if str(item).strip()]
+    if not cleaned:
+        return ""
+    parents: list[PurePosixPath] = []
+    for item in cleaned:
+        candidate = PurePosixPath(item)
+        parents.append(candidate if item.endswith("/") else candidate.parent)
+    if not parents:
+        return ""
+    common = parents[0]
+    for parent in parents[1:]:
+        prefix_parts: list[str] = []
+        for left, right in zip(common.parts, parent.parts):
+            if left != right:
+                break
+            prefix_parts.append(left)
+        if not prefix_parts:
+            return ""
+        common = PurePosixPath(*prefix_parts)
+    common_text = common.as_posix().strip()
+    return "" if common_text in {"", "."} else common_text
+
+
+def _workspace_context_text(workspace_dir: str, artifacts: list[str]) -> str:
+    artifact_lines = "\n".join(f"- {item}" for item in artifacts[-8:]) if artifacts else "(none yet)"
+    return (
+        f"Shared workspace directory: {workspace_dir or '(not confirmed yet)'}\n"
+        f"Known artifacts:\n{artifact_lines}"
+    )
 
 
 def _compile_supervisor_app(
@@ -183,6 +219,8 @@ def run_supervisor_dynamic(
             on_event(item)
 
     trace: list[TraceEvent] = []
+    tool_evidence: list[str] = []
+    latest_tool_artifacts: dict[str, dict[str, Any]] = {}
 
     def make_tool_trace_hook(agent: AgentDefinition):
         def on_tool_trace(meta: dict[str, Any]) -> None:
@@ -232,6 +270,11 @@ def run_supervisor_dynamic(
 
             if stage == "tool_blocked":
                 reason = str(meta.get("reason") or "Tool execution failed; continuing without this tool.")
+                tool_evidence.append(f"{agent.name} tool {tool_name} blocked: {reason[:300]}")
+                latest_tool_artifacts[agent.id] = {
+                    "output_dir": "",
+                    "generated_files": [],
+                }
                 push(
                     trace,
                     event(
@@ -257,6 +300,27 @@ def run_supervisor_dynamic(
             ok = bool(meta.get("ok"))
             generated_files = meta.get("generated_files")
             files = generated_files if isinstance(generated_files, list) else []
+            output_dir = str(meta.get("output_dir") or "").strip()
+            error_text = str(meta.get("error") or "").strip()
+            preview = str(meta.get("result_preview") or "").strip()
+            evidence_parts = [
+                f"agent={agent.name}",
+                f"tool={tool_name}",
+                f"ok={ok}",
+            ]
+            if output_dir:
+                evidence_parts.append(f"output_dir={output_dir}")
+            if files:
+                evidence_parts.append("generated_files=" + ", ".join(str(item) for item in files[:8]))
+            if error_text:
+                evidence_parts.append(f"error={error_text[:240]}")
+            if preview:
+                evidence_parts.append(f"preview={preview[:240]}")
+            tool_evidence.append("; ".join(evidence_parts))
+            latest_tool_artifacts[agent.id] = {
+                "output_dir": output_dir,
+                "generated_files": [str(item).strip() for item in files if str(item).strip()],
+            }
             detail = f"{agent.name} finished {tool_name} ({'success' if ok else 'failed'})."
             attempt_count = int(meta.get("attempt_count") or 1)
             max_attempts = int(meta.get("max_attempts") or 1)
@@ -346,6 +410,9 @@ def run_supervisor_dynamic(
         return {
             "max_cycles": max_cycles,
             "cycle": 0,
+            "workspace_dir": "",
+            "artifacts": [],
+            "tool_evidence": [],
             "current_focus_task": state["user_input"],
             "reports": [],
         }
@@ -353,6 +420,11 @@ def run_supervisor_dynamic(
     def delegation_node(state: SupervisorState) -> SupervisorState:
         cycle = int(state.get("cycle", 0)) + 1
         focus_task = str(state.get("current_focus_task") or state["user_input"]).strip() or state["user_input"]
+        workspace_dir = str(state.get("workspace_dir") or "").strip()
+        artifacts = [str(item).strip() for item in (state.get("artifacts") or []) if str(item).strip()]
+        workspace_context = _workspace_context_text(workspace_dir, artifacts)
+        reports = list(state.get("reports", []))
+        reports_block = "\n".join(reports) if reports else "(none yet)"
         push(
             trace,
             event(
@@ -363,7 +435,18 @@ def run_supervisor_dynamic(
                 cycle=cycle,
             ),
         )
-        routed_worker_id, route_reason = llm_gateway.route(focus_task, workers)
+        routing_input = (
+            f"{focus_task}\n\n"
+            f"Original user request:\n{state['user_input']}\n\n"
+            f"Shared workspace context:\n{workspace_context}\n\n"
+            f"Completed reports so far:\n{reports_block}\n\n"
+            "Select the worker whose responsibility best matches the current task. "
+            "Use the team when another specialist can materially improve the result before completion, but do not force handoffs when the current best worker should keep going. "
+            "If there are no reports yet and the request reasonably spans product, design, and engineering, prefer a specialist who can clarify or structure the work before final implementation. "
+            "After those concerns are covered, prefer the specialist who closes the biggest remaining gap. "
+            "If the current task requires creating or modifying files, prefer a worker responsible for implementation or delivery."
+        )
+        routed_worker_id, route_reason = llm_gateway.route(routing_input, workers)
         worker = worker_by_id[routed_worker_id]
         push(
             trace,
@@ -376,6 +459,7 @@ def run_supervisor_dynamic(
                 cycle=cycle,
                 reason=route_reason,
                 focus_task=focus_task,
+                workspace_dir=workspace_dir,
             ),
         )
         push(
@@ -411,13 +495,19 @@ def run_supervisor_dynamic(
             )
             reports = list(state.get("reports", []))
             completed_summary = "\n".join(reports) if reports else "(none yet)"
+            workspace_dir = str(state.get("workspace_dir") or "").strip()
+            artifacts = [str(item).strip() for item in (state.get("artifacts") or []) if str(item).strip()]
+            workspace_context = _workspace_context_text(workspace_dir, artifacts)
             worker_input = (
                 f"Original user request:\n{state['user_input']}\n\n"
+                f"Shared workspace context:\n{workspace_context}\n\n"
                 f"Current focus task (cycle {cycle}):\n{state['current_focus_task']}\n\n"
                 f"Completed reports so far:\n{completed_summary}\n\n"
                 "Execute the current focus task directly.\n"
+                "Keep using the shared workspace directory when it is confirmed. If it is not confirmed yet, follow the location stated in the original user request.\n"
                 "If the target path or deliverable is already clear, prefer directly creating or writing it instead of repeatedly listing or searching first.\n"
-                "Use inspection first only when the path is ambiguous, existing content must be preserved, or you need facts you do not yet have."
+                "Use inspection first only when the path is ambiguous, existing content must be preserved, or you need facts you do not yet have.\n"
+                "When you create or change files, report the exact directory and file paths produced."
             )
             worker_answer = llm_gateway.run_agent(
                 worker,
@@ -447,10 +537,25 @@ def run_supervisor_dynamic(
                     cycle=cycle,
                 ),
             )
+            latest_artifacts = latest_tool_artifacts.get(worker.id, {})
+            next_workspace = workspace_dir
+            output_dir = str(latest_artifacts.get("output_dir") or "").strip()
+            if output_dir:
+                next_workspace = output_dir
+            next_artifacts = [str(item).strip() for item in (state.get("artifacts") or []) if str(item).strip()]
+            for item in latest_artifacts.get("generated_files") or []:
+                path_text = str(item).strip()
+                if path_text and path_text not in next_artifacts:
+                    next_artifacts.append(path_text)
+            if not next_workspace:
+                next_workspace = _derive_workspace_dir(next_artifacts)
 
             return {
                 "reports": reports,
                 "combined_report": "\n\n".join(reports),
+                "tool_evidence": list(tool_evidence),
+                "workspace_dir": next_workspace,
+                "artifacts": next_artifacts,
             }
 
         return worker_node
@@ -470,9 +575,68 @@ def run_supervisor_dynamic(
             ),
         )
 
+        workspace_dir = str(state.get("workspace_dir") or "").strip()
+        artifacts = [str(item).strip() for item in (state.get("artifacts") or []) if str(item).strip()]
+        evidence = list(state.get("tool_evidence", tool_evidence))
+        workspace_context = _workspace_context_text(workspace_dir, artifacts)
+        if not artifacts and cycle < max_cycles:
+            next_focus_task = (
+                "Create or update the requested deliverable in the shared workspace. "
+                f"{workspace_context}. "
+                "Use filesystem tools to produce concrete files and report the exact paths created or changed."
+            )
+            review_reason = "No concrete artifacts are confirmed yet, so the workflow should continue toward real file output."
+            push(
+                trace,
+                event(
+                    "state_updated",
+                    "Review Decision",
+                    "Supervisor decided to continue until concrete artifacts exist.",
+                    node_id=REVIEW_NODE,
+                    cycle=cycle,
+                    reason=review_reason,
+                    next_focus_task=next_focus_task,
+                ),
+            )
+            push(
+                trace,
+                event(
+                    "route_selected",
+                    "Loop Continue",
+                    "Supervisor routed back to delegation policy.",
+                    node_id=REVIEW_NODE,
+                    next_node_id=DELEGATION_NODE,
+                    cycle=cycle,
+                ),
+            )
+            push(
+                trace,
+                event(
+                    "node_exited",
+                    "Exit Supervisor Review",
+                    "Continue to next delegation cycle.",
+                    node_id=REVIEW_NODE,
+                    cycle=cycle,
+                ),
+            )
+            return {
+                "continue_loop": True,
+                "current_focus_task": next_focus_task,
+            }
+        review_reports = [
+            *reports,
+            (
+                "Supervisor shared workspace state:\n"
+                f"{workspace_context}\n"
+                "Tool evidence:\n"
+                + ("\n".join(evidence[-8:]) if evidence else "(none yet)")
+                + "\nSupervisor guidance:\n"
+                + "If another specialist can materially improve the result before completion, prefer continuing with a concrete next focus task instead of ending early."
+            ),
+        ]
         should_continue, next_focus_task, review_reason = llm_gateway.supervisor_review_decision(
             user_input=state["user_input"],
-            reports=reports,
+            reports=review_reports,
             cycle=cycle,
             max_cycles=max_cycles,
         )
@@ -563,10 +727,18 @@ def run_supervisor_dynamic(
         )
         finalizer_worker = worker_by_id.get(state.get("current_worker_id", ""), workers[0])
         combined_report = state.get("combined_report", "")
+        evidence_block = "\n".join(list(state.get("tool_evidence", tool_evidence))[-8:]) if state.get("tool_evidence") else "(none yet)"
+        specialist_answer = (
+            f"{combined_report}\n\n"
+            "Shared workspace context:\n"
+            f"{_workspace_context_text(str(state.get('workspace_dir') or '').strip(), list(state.get('artifacts') or []))}\n\n"
+            "Tool evidence:\n"
+            f"{evidence_block}"
+        ).strip()
         assistant_message = llm_gateway.finalize(
             user_input=state["user_input"],
             agent=finalizer_worker,
-            specialist_answer=combined_report,
+            specialist_answer=specialist_answer,
         )
         push(
             trace,
