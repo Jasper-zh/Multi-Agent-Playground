@@ -1803,7 +1803,7 @@ class SQLitePlaygroundStore:
                         description=spec["description"],
                         system_prompt=spec["system_prompt"],
                         skill_ids=resolve_skill_ids(spec["skill_names"]),
-                        builtin_capabilities=[],
+                        builtin_capabilities=["filesystem"],
                     )
                 )
             agents = self.list_agents()

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, inject, reactive, ref, watch } from "vue";
+import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import {
   CheckCircle2,
   ChevronUp,
@@ -39,6 +39,21 @@ const form = reactive({
 });
 const editingProfileId = ref("");
 const editingEnvId = ref("");
+
+function collapseAll() {
+  editingProfileId.value = "";
+  editingEnvId.value = "";
+}
+
+function handleDocumentClick(event) {
+  const settingsCard = event.target.closest(".settings-card");
+  if (!settingsCard) {
+    collapseAll();
+  }
+}
+
+onMounted(() => document.addEventListener("click", handleDocumentClick));
+onUnmounted(() => document.removeEventListener("click", handleDocumentClick));
 const providerPresets = [
   {
     id: "moonshot",
@@ -216,6 +231,7 @@ function buildSavedProfiles() {
 
 function submitModelProfiles() {
   if (props.saving) return;
+  collapseAll();
   emit("save", {
     ...buildPayload(),
     env_vars: buildSavedEnvVars(),
@@ -243,6 +259,7 @@ function saveEnvVarOnEnter(event) {
 
 function activateAndSave(profileId) {
   if (props.saving) return;
+  collapseAll();
   form.active_model_profile_id = profileId;
   submitModelProfiles();
 }
@@ -277,6 +294,7 @@ function submitEnvEntry(envId) {
   const entry = form.env_vars.find((item) => item.id === envId);
   if (!entry || !String(entry.key || "").trim()) return;
   editingEnvId.value = "";
+  collapseAll();
   submitEnvVars();
 }
 

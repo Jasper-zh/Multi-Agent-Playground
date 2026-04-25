@@ -230,12 +230,17 @@ def delete_agent(agent_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="Agent not found.")
 
     usage = store.agent_usage_workflows(agent_id)
-    if usage:
-        names = ", ".join(workflow.name for workflow in usage[:5])
+    blocking = [w for w in usage if w.type != "single_agent_chat"]
+    if blocking:
+        names = ", ".join(workflow.name for workflow in blocking[:5])
         raise HTTPException(
             status_code=409,
             detail=f"Agent is still used by workflow(s): {names}",
         )
+
+    for workflow in usage:
+        if workflow.type == "single_agent_chat":
+            store.delete_workflow(workflow.id)
 
     deleted = store.delete_agent(agent_id)
     return {"deleted": deleted}
